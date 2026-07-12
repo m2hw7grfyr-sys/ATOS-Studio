@@ -1,0 +1,2 @@
+"""ATOS Studio application package."""
+
