@@ -1,6 +1,6 @@
 # ATOS Studio Integration Protocol
 
-Sprint: Studio Sprint 01
+Sprint: Studio Sprint 02
 Version: 0.1.0
 
 ## Ownership Boundary
@@ -34,7 +34,7 @@ Studio is responsible for:
 - ATOS posts must be associated through stable IDs, preferably ATOS `posts.uuid` plus platform/source IDs.
 - Sending the same post to Studio more than once must be detectable.
 - Later sprints may support both manual send-to-Studio and automatic pool ingestion.
-- Sprint 01 does not implement automatic ingestion.
+- Sprint 02 implements manual import only. It does not implement automatic ingestion.
 - Missing optional generation services, including GPU Worker and ComfyUI, must not prevent Studio startup.
 
 ## Recommended Mode
@@ -43,51 +43,39 @@ Use ATOS internal APIs for ATOS-owned content and let Studio own future `studio_
 
 Direct shared database access is not recommended for ATOS core tables because it would couple two release cycles and allow Studio to bypass ATOS lifecycle rules. A future mixed deployment may place `studio_` tables in the same database instance, but those tables must remain Studio-owned.
 
-## Suggested API Contract
+## Implemented ATOS Read-Only API
 
-The following API names define the future protocol. They are not fully implemented in Sprint 01.
+ATOS now exposes a read-only Studio API under `/api/studio`.
 
-### Create Or Upsert Content Item
+Authentication:
 
-`POST /api/studio/content-items`
-
-Suggested request:
-
-```json
-{
-  "source_platform": "reddit",
-  "source_post_id": "external-or-internal-id",
-  "atos_post_id": "atos-post-uuid-or-id",
-  "source_url": "https://example.com/post",
-  "title": "post title",
-  "body": "post body",
-  "author": "author",
-  "published_at": "2026-07-12T00:00:00Z",
-  "score": 0,
-  "comment_count": 0,
-  "risk_level": "low",
-  "tags": [],
-  "metadata": {}
-}
+```http
+Authorization: Bearer <ATOS_STUDIO_API_TOKEN>
 ```
 
-Suggested successful response:
+ATOS configuration:
 
-```json
-{
-  "id": "studio-content-item-id",
-  "status": "created",
-  "idempotency_key": "reddit:external-or-internal-id"
-}
+```env
+ATOS_STUDIO_AUTH_ENABLED=true
+ATOS_STUDIO_API_TOKEN=replace-with-a-strong-token
 ```
 
-Suggested duplicate response:
+Studio configuration:
+
+```env
+ATOS_BASE_URL=http://127.0.0.1:8000
+ATOS_STUDIO_API_TOKEN=replace-with-the-same-token
+```
+
+### Health
+
+`GET /api/studio/health`
 
 ```json
 {
-  "id": "existing-studio-content-item-id",
-  "status": "duplicate",
-  "idempotency_key": "reddit:external-or-internal-id"
+  "service": "atos-studio-api",
+  "status": "ok",
+  "api_version": "1"
 }
 ```
 
@@ -95,36 +83,98 @@ Suggested duplicate response:
 
 `GET /api/studio/content-items`
 
-Suggested query parameters:
+Supported query parameters:
 
-- `source_platform`
-- `status`
-- `tag`
+- `platform`
+- `min_score`
+- `risk_level`
+- `search`
 - `created_after`
-- `limit`
-- `cursor`
+- `created_before`
+- `limit`, default `50`, max `200`
+- `offset`, default `0`
 
-### Get Content Item
-
-`GET /api/studio/content-items/{id}`
-
-Returns one Studio content item and references back to ATOS source IDs.
-
-### Get Project Status
-
-`GET /api/studio/projects/{id}/status`
-
-Suggested response:
+Response shape:
 
 ```json
 {
-  "id": "studio-project-id",
-  "status": "draft",
-  "source_content_item_id": "studio-content-item-id",
-  "generation_queue_status": "not_started",
-  "updated_at": "2026-07-12T00:00:00Z"
+  "items": [],
+  "total": 0,
+  "limit": 50,
+  "offset": 0
 }
 ```
+
+### Get Content Item
+
+`GET /api/studio/content-items/{source_post_id}`
+
+The lookup accepts ATOS `posts.uuid`, ATOS numeric `posts.id`, or platform `source_post_id`. The response includes both ATOS and platform identifiers.
+
+```json
+{
+  "atos_post_id": "1",
+  "atos_post_uuid": "uuid",
+  "source_platform": "reddit",
+  "source_post_id": "abc123",
+  "source_url": "https://example.com/post",
+  "title": "post title",
+  "body": "post body",
+  "author": "author",
+  "published_at": null,
+  "collected_at": "2026-07-12T00:00:00",
+  "score": 0,
+  "comment_count": 0,
+  "risk_level": null,
+  "tags": [],
+  "metadata": {}
+}
+```
+
+ATOS currently does not have a native post `risk_level` column, so `risk_level` is returned as `null`.
+
+## Studio Content Pool API
+
+### Import From ATOS
+
+`POST /api/content-items/import`
+
+Request:
+
+```json
+{
+  "source_platform": "reddit",
+  "source_post_id": "abc123"
+}
+```
+
+First import returns `201 Created`:
+
+```json
+{
+  "created": true,
+  "duplicate": false,
+  "item": {}
+}
+```
+
+Duplicate import returns `200 OK`:
+
+```json
+{
+  "created": false,
+  "duplicate": true,
+  "item": {}
+}
+```
+
+### Studio Content Items
+
+- `GET /api/content-items`
+- `GET /api/content-items/{studio_item_id}`
+- `PATCH /api/content-items/{studio_item_id}/status`
+
+Allowed statuses: `pending_review`, `approved`, `rejected`, `archived`.
 
 ## Idempotency
 
@@ -150,7 +200,7 @@ Duplicate handling:
 
 - If the idempotency key already exists, Studio returns the existing content item.
 - Duplicate requests must not create a second content item.
-- If the new payload contains additional non-empty fields, a future sprint may merge metadata, but Sprint 01 only defines the behavior.
+- If the new payload contains additional non-empty fields, a future sprint may merge metadata. Sprint 02 returns the existing item unchanged.
 
 ## Missing Data Handling
 
@@ -169,13 +219,12 @@ Duplicate handling:
 - Backward-compatible optional fields should be ignored or stored under `metadata`.
 - Breaking field changes require a new protocol version.
 
-## Future Authentication
+## Authentication
 
-Sprint 01 does not implement API authentication.
+Sprint 02 implements service-to-service bearer token authentication for ATOS `/api/studio`.
 
-Recommended future options:
+Future options:
 
-- Service-to-service bearer token stored in `.env`, for example `ATOS_STUDIO_API_TOKEN`.
 - HMAC signature over body and timestamp for push requests.
 - Shared human login should only be considered after ATOS has a confirmed formal login/session/JWT boundary.
 
@@ -190,4 +239,3 @@ Suggested status codes:
 - `409 Conflict`: incompatible state or protocol version.
 - `422 Unprocessable Entity`: validation failed.
 - `503 Service Unavailable`: Studio storage unavailable.
-

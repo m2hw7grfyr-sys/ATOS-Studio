@@ -15,8 +15,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 
 class Settings(BaseSettings):
     atos_base_url: str = "http://127.0.0.1:8000"
+    atos_studio_api_token: str = ""
+    atos_request_timeout_seconds: float = 10
     atos_database_url: str = ""
-    studio_database_url: str = Field(default=f"sqlite:///{ROOT_DIR / 'storage' / 'studio.db'}")
+    studio_database_url: str = Field(default="sqlite:///./storage/atos_studio.db")
     studio_storage_root: str = Field(default=str(ROOT_DIR / "storage"))
     studio_port: int = 8502
     comfyui_base_url: str = ""
@@ -71,4 +73,3 @@ def database_connection_status(database_url: Optional[str]) -> str:
         path = Path(database_url.removeprefix("sqlite:///"))
         return "Configured" if path.parent.exists() else "Storage path missing"
     return "Configured"
-
