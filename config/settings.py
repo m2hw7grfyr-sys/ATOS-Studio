@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     atos_base_url: str = "http://127.0.0.1:8000"
     atos_studio_api_token: str = ""
     atos_request_timeout_seconds: float = 10
+    studio_push_auth_enabled: bool = True
+    studio_push_api_token: str = ""
     atos_database_url: str = ""
     studio_database_url: str = Field(default="sqlite:///./storage/atos_studio.db")
     studio_storage_root: str = Field(default=str(ROOT_DIR / "storage"))

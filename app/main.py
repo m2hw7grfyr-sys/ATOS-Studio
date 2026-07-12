@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import secrets
 from html import escape
 from urllib.parse import quote, parse_qs
+from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,10 @@ from models.schemas import (
     ImportContentItemRequest,
     ImportContentItemResponse,
     StudioContentItemRead,
+    StudioContentPushRequest,
+    StudioContentPushResponse,
+    StudioSourceStatusBatchRequest,
+    StudioSourceStatusResponse,
     UpdateContentStatusRequest,
     VALID_CONTENT_STATUSES,
 )
@@ -199,6 +205,22 @@ def item_actions(item_id: str) -> str:
     return '<div class="actions">' + f'<a class="button secondary" href="/content-pool/{escape(item_id)}">查看</a>' + "".join(buttons) + "</div>"
 
 
+def require_push_token(authorization: Optional[str] = Header(default=None)) -> None:
+    settings = get_settings()
+    if not settings.studio_push_auth_enabled:
+        if settings.studio_env.lower() == "development":
+            return
+        raise HTTPException(status_code=403, detail="studio push auth cannot be disabled outside development")
+    expected = settings.studio_push_api_token
+    if not expected:
+        raise HTTPException(status_code=401, detail="studio push api token is not configured")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing studio push bearer token")
+    token = authorization.removeprefix("Bearer ").strip()
+    if not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="invalid studio push bearer token")
+
+
 def content_pool_table(items: list[StudioContentItemRead]) -> str:
     if not items:
         return '<div class="placeholder">内容池暂无数据</div>'
@@ -212,6 +234,11 @@ def content_pool_table(items: list[StudioContentItemRead]) -> str:
             f"<td>{'' if item.source_score is None else item.source_score}</td>"
             f"<td>{'' if item.comment_count is None else item.comment_count}</td>"
             f"<td>{escape(item.risk_level or '')}</td>"
+            f"<td>{escape(item.source_type)}</td>"
+            f"<td>{escape(item.requested_content_type or '')}</td>"
+            f"<td>{escape(', '.join(item.target_platforms))}</td>"
+            f"<td>{escape(str(item.push_count))}</td>"
+            f"<td>{escape(item.last_pushed_at.isoformat() if item.last_pushed_at else '')}</td>"
             f"<td>{escape(item.status)}</td>"
             f"<td>{escape(item.imported_at.isoformat())}</td>"
             f"<td>{item_actions(item.id)}</td>"
@@ -220,7 +247,8 @@ def content_pool_table(items: list[StudioContentItemRead]) -> str:
     return (
         "<table><thead><tr>"
         "<th>标题</th><th>平台</th><th>作者</th><th>来源评分</th><th>评论数</th>"
-        "<th>风险等级</th><th>状态</th><th>导入时间</th><th>操作</th>"
+        "<th>风险等级</th><th>来源类型</th><th>目标内容</th><th>目标平台</th><th>推送次数</th><th>最后推送</th>"
+        "<th>状态</th><th>导入时间</th><th>操作</th>"
         "</tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
@@ -290,6 +318,12 @@ def content_pool_detail(item_id: str, db: Session = Depends(get_db)) -> HTMLResp
         <div>评论数</div><div>{'' if item.comment_count is None else item.comment_count}</div>
         <div>风险等级</div><div>{escape(item.risk_level or '')}</div>
         <div>标签</div><div>{escape(tags)}</div>
+        <div>来源类型</div><div>{escape(item.source_type)}</div>
+        <div>目标内容类型</div><div>{escape(item.requested_content_type or '')}</div>
+        <div>目标平台</div><div>{escape(', '.join(item.target_platforms))}</div>
+        <div>操作备注</div><div>{escape(item.operator_note or '')}</div>
+        <div>推送次数</div><div>{escape(str(item.push_count))}</div>
+        <div>最后推送时间</div><div>{escape(item.last_pushed_at.isoformat() if item.last_pushed_at else '')}</div>
         <div>状态</div><div>{escape(item.status)}</div>
         <div>导入时间</div><div>{escape(item.imported_at.isoformat())}</div>
       </section>
@@ -370,6 +404,77 @@ def import_content_item_api(
         item=serialize_item(row),
     )
     return result.model_dump(mode="json")
+
+
+@app.post("/api/content-items/push")
+def push_content_item_api(
+    payload: StudioContentPushRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_push_token),
+) -> dict:
+    try:
+        row, created = ContentItemRepository(db).push_from_atos(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.commit()
+    response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+    return StudioContentPushResponse(
+        created=created,
+        duplicate=not created,
+        studio_item_id=row.id,
+        status=row.status,
+        source_type=row.source_type,
+    ).model_dump(mode="json")
+
+
+def source_status_payload(row: StudioContentItem | None) -> StudioSourceStatusResponse:
+    if not row:
+        return StudioSourceStatusResponse(exists=False)
+    return StudioSourceStatusResponse(
+        exists=True,
+        studio_item_id=row.id,
+        status=row.status,
+        source_type=row.source_type,
+        imported_at=row.imported_at,
+        last_pushed_at=row.last_pushed_at,
+    )
+
+
+@app.get("/api/content-items/source-status")
+def source_status_api(
+    source_platform: str = Query(default=""),
+    source_post_id: str = "",
+    atos_post_id: str = "",
+    db: Session = Depends(get_db),
+    _: None = Depends(require_push_token),
+) -> dict:
+    if not source_platform or (not source_post_id and not atos_post_id):
+        raise HTTPException(status_code=422, detail="source_platform and source_post_id or atos_post_id are required")
+    row = ContentItemRepository(db).find_by_source(source_platform, source_post_id or None, atos_post_id or None)
+    return source_status_payload(row).model_dump(mode="json")
+
+
+@app.post("/api/content-items/source-status/batch")
+def source_status_batch_api(
+    payload: StudioSourceStatusBatchRequest,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_push_token),
+) -> dict:
+    repo = ContentItemRepository(db)
+    results = []
+    for item in payload.items:
+        row = repo.find_by_source(item.source_platform, item.source_post_id, item.atos_post_id)
+        status_payload = source_status_payload(row).model_dump(mode="json")
+        status_payload.update(
+            {
+                "source_platform": item.source_platform,
+                "source_post_id": item.source_post_id,
+                "atos_post_id": item.atos_post_id,
+            }
+        )
+        results.append(status_payload)
+    return {"items": results}
 
 
 @app.get("/api/content-items")

@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.main import app, get_db
+from config.settings import get_settings
 from config.settings import Settings
 from database import Base
 from models.schemas import AtosContentItem
@@ -71,6 +72,9 @@ class StudioAppTests(unittest.TestCase):
 
 class ContentPoolTests(unittest.TestCase):
     def setUp(self):
+        os.environ["STUDIO_PUSH_AUTH_ENABLED"] = "true"
+        os.environ["STUDIO_PUSH_API_TOKEN"] = "studio-push-test-token"
+        get_settings.cache_clear()
         self.engine = create_engine(
             "sqlite:///:memory:",
             connect_args={"check_same_thread": False},
@@ -92,6 +96,7 @@ class ContentPoolTests(unittest.TestCase):
     def tearDown(self):
         app.dependency_overrides.clear()
         Base.metadata.drop_all(self.engine)
+        get_settings.cache_clear()
 
     def atos_item(self):
         return AtosContentItem(
@@ -150,6 +155,93 @@ class ContentPoolTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn("原始source snapshot", page.text)
         self.assertIn("Studio candidate", page.text)
+
+    def push_payload(self):
+        return {
+            "source_platform": "reddit",
+            "atos_post_id": "1",
+            "source_post_id": "abc123",
+            "source_url": "https://example.com/abc123",
+            "title": "Studio push candidate",
+            "body": "Useful pushed text",
+            "author": "author-a",
+            "published_at": datetime.now(timezone.utc).isoformat(),
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "source_score": 88,
+            "comment_count": 42,
+            "risk_level": "low",
+            "tags": ["studio"],
+            "metadata": {"community": "demo"},
+            "push_context": {
+                "requested_content_type": "video",
+                "target_platforms": ["tiktok"],
+                "operator_note": "operator note",
+            },
+        }
+
+    def test_push_requires_valid_token(self):
+        missing = self.client.post("/api/content-items/push", json=self.push_payload())
+        wrong = self.client.post(
+            "/api/content-items/push",
+            headers={"Authorization": "Bearer wrong"},
+            json=self.push_payload(),
+        )
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(wrong.status_code, 401)
+
+    def test_push_is_idempotent_and_does_not_reset_approved_status(self):
+        headers = {"Authorization": "Bearer studio-push-test-token"}
+        created = self.client.post("/api/content-items/push", headers=headers, json=self.push_payload())
+        duplicate = self.client.post("/api/content-items/push", headers=headers, json=self.push_payload())
+
+        self.assertEqual(created.status_code, 201)
+        self.assertTrue(created.json()["created"])
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertTrue(duplicate.json()["duplicate"])
+        item_id = created.json()["studio_item_id"]
+
+        approved = self.client.patch(f"/api/content-items/{item_id}/status", json={"status": "approved"})
+        self.assertEqual(approved.status_code, 200)
+        pushed_again = self.client.post("/api/content-items/push", headers=headers, json=self.push_payload())
+        self.assertEqual(pushed_again.status_code, 200)
+        item = self.client.get(f"/api/content-items/{item_id}").json()
+        self.assertEqual(item["status"], "approved")
+        self.assertEqual(item["push_count"], 3)
+
+    def test_source_status_and_batch_status(self):
+        headers = {"Authorization": "Bearer studio-push-test-token"}
+        self.client.post("/api/content-items/push", headers=headers, json=self.push_payload())
+
+        status_response = self.client.get(
+            "/api/content-items/source-status",
+            headers=headers,
+            params={"source_platform": "reddit", "source_post_id": "abc123"},
+        )
+        batch_response = self.client.post(
+            "/api/content-items/source-status/batch",
+            headers=headers,
+            json={
+                "items": [
+                    {"source_platform": "reddit", "source_post_id": "abc123"},
+                    {"source_platform": "reddit", "source_post_id": "missing"},
+                ]
+            },
+        )
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertTrue(status_response.json()["exists"])
+        self.assertEqual(batch_response.status_code, 200)
+        self.assertTrue(batch_response.json()["items"][0]["exists"])
+        self.assertFalse(batch_response.json()["items"][1]["exists"])
+
+    def test_invalid_push_payload_returns_422(self):
+        headers = {"Authorization": "Bearer studio-push-test-token"}
+        response = self.client.post(
+            "/api/content-items/push",
+            headers=headers,
+            json={"source_platform": "reddit", "title": ""},
+        )
+        self.assertEqual(response.status_code, 422)
 
 
 if __name__ == "__main__":

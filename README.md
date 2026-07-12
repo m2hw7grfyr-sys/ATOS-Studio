@@ -6,6 +6,12 @@ ATOS Studio is an independent companion repository for ATOS. Sprint 02 adds the 
 ATOS posts -> ATOS read-only Studio API -> Studio manual import -> studio_content_items -> content pool page
 ```
 
+Sprint 03 adds active ATOS push:
+
+```text
+ATOS Post Pool -> ATOS backend proxy -> Studio push API -> studio_content_items -> ATOS status feedback
+```
+
 Video generation, ComfyUI, Wan, TTS, subtitles, FFmpeg, cloud backup, automatic ingestion, clustering, and shared user login are not implemented.
 
 ## Environment
@@ -35,6 +41,8 @@ Use the same token value in ATOS and Studio:
 ATOS_BASE_URL=http://127.0.0.1:8000
 ATOS_STUDIO_API_TOKEN=replace-with-the-same-token
 ATOS_REQUEST_TIMEOUT_SECONDS=10
+STUDIO_PUSH_AUTH_ENABLED=true
+STUDIO_PUSH_API_TOKEN=replace-with-the-same-token
 STUDIO_DATABASE_URL=sqlite:///./storage/atos_studio.db
 ```
 
@@ -82,6 +90,22 @@ curl -X POST http://127.0.0.1:8502/api/content-items/import \
   -d '{"source_platform":"reddit","source_post_id":"abc123"}'
 ```
 
+Push from ATOS backend:
+
+```bash
+curl -X POST http://127.0.0.1:8502/api/content-items/push \
+  -H "Authorization: Bearer replace-with-the-same-token" \
+  -H "Content-Type: application/json" \
+  -d '{"source_platform":"reddit","atos_post_id":"1","source_post_id":"abc123","title":"Example","body":"Body","push_context":{"requested_content_type":"video","target_platforms":["tiktok"],"operator_note":""}}'
+```
+
+Source status:
+
+```bash
+curl -H "Authorization: Bearer replace-with-the-same-token" \
+  "http://127.0.0.1:8502/api/content-items/source-status?source_platform=reddit&source_post_id=abc123"
+```
+
 List content items:
 
 ```bash
@@ -111,6 +135,7 @@ The content pool page includes:
 - Manual ATOS import by platform and post ID/source post ID
 - List with title, platform, author, score, comments, risk level, status, imported time
 - Detail page with source snapshot
+- Source type, requested content type, target platforms, push count, and last pushed time
 - Actions: view, approve, reject, archive
 
 ## Idempotency
@@ -123,6 +148,8 @@ Duplicate imports do not create another row. Priority:
 4. content hash fallback
 
 The original ATOS response is stored in `source_snapshot_json` on import.
+
+Sprint 03 stores ATOS push context in the same table and uses `source_type=atos_manual_push`.
 
 ## SQLite And PostgreSQL
 
@@ -170,4 +197,3 @@ Run `.venv/bin/alembic upgrade head`.
 `Address already in use`
 
 Use another port, for example `--port 8503`, or stop the existing local process.
-

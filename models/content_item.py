@@ -44,7 +44,11 @@ class StudioContentItem(Base):
     source_hash: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(40), default="pending_review", index=True)
     source_type: Mapped[str] = mapped_column(String(40), default="manual_import", index=True)
+    requested_content_type: Mapped[Optional[str]] = mapped_column(String(60))
+    target_platforms_json: Mapped[str] = mapped_column(Text, default="[]")
+    operator_note: Mapped[Optional[str]] = mapped_column(String(500))
+    last_pushed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    push_count: Mapped[int] = mapped_column(default=0)
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
-

@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 import time
 
 from config.settings import get_git_commit, get_settings
-from database import database_status
+from database import SessionLocal, database_status
+from models.content_item import StudioContentItem, utc_now
+from sqlalchemy import func, select
 from services.atos_client import AtosAuthError, AtosClient, AtosClientError, AtosUnavailableError
 
 
@@ -45,8 +47,29 @@ def build_status_cards() -> list[dict]:
     settings = get_settings()
     db_status = database_status()
     atos_status = atos_connection_status()
+    stats = {
+        "total": "Unavailable",
+        "pending": "Unavailable",
+        "atos_push": "Unavailable",
+        "today": "Unavailable",
+    }
+    try:
+        today_start = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
+        with SessionLocal() as db:
+            stats = {
+                "total": str(db.scalar(select(func.count()).select_from(StudioContentItem)) or 0),
+                "pending": str(db.scalar(select(func.count()).where(StudioContentItem.status == "pending_review")) or 0),
+                "atos_push": str(db.scalar(select(func.count()).where(StudioContentItem.source_type == "atos_manual_push")) or 0),
+                "today": str(db.scalar(select(func.count()).where(StudioContentItem.imported_at >= today_start)) or 0),
+            }
+    except Exception:
+        pass
     return [
         {"label": "Studio服务状态", "value": "Running", "class_name": "status-ok"},
+        {"label": "内容池总数", "value": stats["total"], "class_name": "status-ok" if stats["total"] != "Unavailable" else "status-warn"},
+        {"label": "待审核数量", "value": stats["pending"], "class_name": "status-ok" if stats["pending"] != "Unavailable" else "status-warn"},
+        {"label": "ATOS手工推送", "value": stats["atos_push"], "class_name": "status-ok" if stats["atos_push"] != "Unavailable" else "status-warn"},
+        {"label": "今日新增", "value": stats["today"], "class_name": "status-ok" if stats["today"] != "Unavailable" else "status-warn"},
         {"label": "当前版本", "value": settings.studio_version, "class_name": ""},
         {"label": "ATOS连接状态", "value": atos_status, "class_name": "status-ok" if atos_status == "Connected" else "status-warn"},
         {"label": "数据库连接状态", "value": db_status, "class_name": "status-ok" if db_status == "Connected" else "status-warn"},

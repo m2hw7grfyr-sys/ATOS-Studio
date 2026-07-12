@@ -174,6 +174,32 @@ Duplicate import returns `200 OK`:
 - `GET /api/content-items/{studio_item_id}`
 - `PATCH /api/content-items/{studio_item_id}/status`
 
+### Push From ATOS
+
+Sprint 03 adds an active push API for ATOS backend use only:
+
+`POST /api/content-items/push`
+
+Authentication:
+
+```text
+Authorization: Bearer <STUDIO_PUSH_API_TOKEN>
+```
+
+Studio configuration:
+
+```env
+STUDIO_PUSH_AUTH_ENABLED=true
+STUDIO_PUSH_API_TOKEN=replace-with-the-same-token
+```
+
+Status feedback:
+
+- `GET /api/content-items/source-status`
+- `POST /api/content-items/source-status/batch`
+
+Pushed items use `source_type=atos_manual_push`. Repeated pushes are idempotent and do not reset existing review status.
+
 Allowed statuses: `pending_review`, `approved`, `rejected`, `archived`.
 
 ## Idempotency

@@ -56,6 +56,8 @@ Priority:
 
 The table enforces uniqueness with `source_platform + source_post_id` and `source_hash`.
 
+Sprint 03 extends the same table for ATOS active push. It adds push context fields and uses `source_type=atos_manual_push`; Sprint 02 manual import remains `source_type=manual_import`.
+
 ## Table Summary
 
 `studio_content_items` stores:
@@ -133,4 +135,3 @@ rm storage/atos_studio.db
 ```
 
 Do not use production ATOS databases for destructive tests.
-
