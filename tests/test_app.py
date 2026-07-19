@@ -14,6 +14,10 @@ from config.settings import Settings
 from database import Base
 from models.schemas import AtosContentItem
 from services.ai.providers.llm_provider import LLMGeneration, LLMHealth
+from services.topic_intelligence_service import (
+    TOPIC_INTELLIGENCE_JOB_TYPE,
+    build_topic_intelligence_context,
+)
 
 
 client = TestClient(app)
@@ -157,7 +161,15 @@ class ContentPoolTests(unittest.TestCase):
         self.assertIn("原始source snapshot", page.text)
         self.assertIn("Studio candidate", page.text)
 
-    def push_payload(self, source_post_id="abc123", title="Studio push candidate", score=88, comments=42, risk="low"):
+    def push_payload(
+        self,
+        source_post_id="abc123",
+        title="Studio push candidate",
+        score=88,
+        comments=42,
+        risk="low",
+        metadata=None,
+    ):
         return {
             "source_platform": "reddit",
             "atos_post_id": source_post_id,
@@ -172,7 +184,7 @@ class ContentPoolTests(unittest.TestCase):
             "comment_count": comments,
             "risk_level": risk,
             "tags": ["studio"],
-            "metadata": {"community": "demo"},
+            "metadata": metadata or {"community": "demo"},
             "push_context": {
                 "requested_content_type": "video",
                 "target_platforms": ["tiktok"],
@@ -244,12 +256,27 @@ class ContentPoolTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
 
-    def create_pushed_item(self, suffix: str, title: str, score: int = 50, comments: int = 5, risk: str = "low"):
+    def create_pushed_item(
+        self,
+        suffix: str,
+        title: str,
+        score: int = 50,
+        comments: int = 5,
+        risk: str = "low",
+        metadata=None,
+    ):
         headers = {"Authorization": "Bearer studio-push-test-token"}
         response = self.client.post(
             "/api/content-items/push",
             headers=headers,
-            json=self.push_payload(source_post_id=suffix, title=title, score=score, comments=comments, risk=risk),
+            json=self.push_payload(
+                source_post_id=suffix,
+                title=title,
+                score=score,
+                comments=comments,
+                risk=risk,
+                metadata=metadata,
+            ),
         )
         self.assertIn(response.status_code, {200, 201})
         return response.json()["studio_item_id"]
@@ -498,6 +525,135 @@ class ContentPoolTests(unittest.TestCase):
         self.assertEqual(run.status_code, 200)
         self.assertEqual(run.json()["status"], "failed")
         self.assertIn("provider unavailable", run.json()["error_message"])
+
+    def test_topic_intelligence_context_includes_comments_and_optional_metrics(self):
+        first_id = self.create_pushed_item(
+            "topic-intel-1",
+            "People feel stuck when ADHD routines break",
+            120,
+            14,
+            "low",
+            metadata={
+                "community": "adhd",
+                "upvotes": 99,
+                "views": 1200,
+                "comments": [
+                    {"text": "I lose momentum after lunch", "score": 18, "reply_count": 2, "author": "user-a"},
+                    "Medication shortage makes planning harder",
+                ],
+            },
+        )
+        second_id = self.create_pushed_item(
+            "topic-intel-2",
+            "Routine advice feels too generic",
+            None,
+            None,
+            "medium",
+            metadata={"community": "adhd"},
+        )
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "ADHD routine breakdown", "content_item_ids": [first_id, second_id]},
+        ).json()
+
+        with self.Session() as db:
+            context = build_topic_intelligence_context(db, package["id"])
+
+        self.assertEqual(len(context["contents"]), 2)
+        self.assertEqual(context["contents"][0]["metrics"]["upvotes"], 99)
+        self.assertEqual(context["contents"][0]["metrics"]["views"], 1200)
+        self.assertEqual(context["contents"][0]["comments"][0]["text"], "I lose momentum after lunch")
+        self.assertIsNone(context["contents"][1]["metrics"]["upvotes"])
+        self.assertEqual(context["contents"][1]["comments"], [])
+
+    def test_topic_intelligence_job_success_failure_and_history_versions(self):
+        item_id = self.create_pushed_item(
+            "topic-intel-ai",
+            "ADHD planning apps all feel overwhelming",
+            85,
+            22,
+            "low",
+            metadata={
+                "comments": [
+                    {"text": "I need fewer steps, not more dashboards", "likes": 12, "author": "user-b"}
+                ]
+            },
+        )
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "ADHD planning apps are overwhelming", "content_item_ids": [item_id]},
+        ).json()
+        self.create_prompt("topic_intelligence")
+
+        class TopicProvider:
+            provider_name = "fake-topic"
+
+            def get_model_info(self):
+                return {"model": "topic-model"}
+
+            def generate(self, prompt: str):
+                self.prompt = prompt
+                return LLMGeneration(
+                    text=(
+                        '{"core_summary":"Users want simpler planning tools.",'
+                        '"audience":{"persona":"ADHD adults","needs":["low friction","less setup"]},'
+                        '"pain_points":[{"problem":"planning tools feel heavy","frequency":"high","emotion":"frustrated"}],'
+                        '"emotional_triggers":["overwhelm"],'
+                        '"controversies":["apps versus paper"],'
+                        '"user_quotes":[{"quote":"I need fewer steps, not more dashboards","source":"https://example.com/topic-intel-ai","engagement":12}],'
+                        '"content_opportunities":[{"angle":"show a two-step planning method","reason":"matches repeated friction","recommended_format":"short explainer"}],'
+                        '"video_direction":{"recommended_hook":"Your planner may be the problem","recommended_style":"supportive","target_platforms":["tiktok"]},'
+                        '"opportunity_score":{"total":82,"engagement":25,"comment_quality":22,"emotion":20,"commercial":15}}'
+                    ),
+                    provider="fake-topic",
+                    model="topic-model",
+                )
+
+        created = self.client.post(
+            f"/api/topic-packages/{package['id']}/ai-jobs",
+            params={"job_type": TOPIC_INTELLIGENCE_JOB_TYPE},
+        )
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["items"][0]["id"]
+        with patch("services.ai_service.get_ai_provider", return_value=TopicProvider()):
+            run = self.client.post(f"/api/ai/jobs/{job_id}/run")
+
+        self.assertEqual(run.status_code, 200)
+        self.assertEqual(run.json()["status"], "completed")
+        analyses = self.client.get(f"/api/topic-packages/{package['id']}/ai-analyses").json()["items"]
+        self.assertEqual(analyses[0]["analysis_type"], "topic_intelligence")
+        self.assertEqual(analyses[0]["result"]["opportunity_score"]["total"], 82)
+
+        second_job = self.client.post(
+            f"/api/topic-packages/{package['id']}/ai-jobs",
+            params={"job_type": TOPIC_INTELLIGENCE_JOB_TYPE},
+        ).json()["items"][0]["id"]
+        with patch("services.ai_service.get_ai_provider", return_value=TopicProvider()):
+            self.client.post(f"/api/ai/jobs/{second_job}/run")
+
+        page = self.client.get(f"/topic-packages/{package['id']}")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("生成主题智能分析", page.text)
+        self.assertIn("重新分析", page.text)
+        self.assertIn("Analysis Version 1", page.text)
+        self.assertIn("Analysis Version 2", page.text)
+        self.assertIn("Users want simpler planning tools.", page.text)
+        self.assertIn("I need fewer steps", page.text)
+
+        bad_job = self.client.post(
+            f"/api/topic-packages/{package['id']}/ai-jobs",
+            params={"job_type": TOPIC_INTELLIGENCE_JOB_TYPE},
+        ).json()["items"][0]["id"]
+
+        class BadProvider(TopicProvider):
+            def generate(self, prompt: str):
+                return LLMGeneration(text="not json", provider="fake-topic", model="topic-model")
+
+        with patch("services.ai_service.get_ai_provider", return_value=BadProvider()):
+            failed = self.client.post(f"/api/ai/jobs/{bad_job}/run")
+        self.assertEqual(failed.status_code, 200)
+        self.assertEqual(failed.json()["status"], "failed")
+        self.assertIn("Expecting value", failed.json()["error_message"])
 
 
 if __name__ == "__main__":

@@ -24,6 +24,12 @@ Sprint 05 adds the AI foundation:
 studio_topic_packages -> AI jobs -> AI analyses -> GPT director prompt -> editorial brief draft
 ```
 
+Sprint 06 adds topic intelligence:
+
+```text
+topic package -> package-level AI context -> topic_intelligence_analysis -> structured strategy insights
+```
+
 Video generation, ComfyUI, Wan, TTS, subtitles, FFmpeg, cloud backup, automatic ingestion, clustering, and shared user login are not implemented.
 
 ## Environment
@@ -279,8 +285,58 @@ Default job types:
 - `pain_point_analysis`
 - `comment_analysis`
 - `video_angle_analysis`
+- `topic_intelligence_analysis`
 
 OpenAI API keys are never returned by API responses and must not be committed.
+
+## Topic Intelligence
+
+Topic Intelligence analyzes a full topic package rather than a single content item. The context includes package metadata, all active source items, optional comments, and optional engagement metrics.
+
+Supported source fields:
+
+- `title`
+- `body`
+- `source_platform`
+- `source_url`
+- `author`
+- `created_at`
+- `score`
+- `upvotes`
+- `likes`
+- `comments_count`
+- `views`
+- `reposts`
+- `bookmarks`
+
+Missing comments or metrics are allowed and are passed as empty lists or null values. Studio does not fabricate metrics.
+
+Create and run a topic intelligence job:
+
+```bash
+curl -X POST "http://127.0.0.1:8502/api/topic-packages/{topic_package_id}/ai-jobs?job_type=topic_intelligence_analysis"
+curl -X POST "http://127.0.0.1:8502/api/ai/jobs/{job_id}/run"
+```
+
+Open the topic package detail page and use:
+
+- `生成主题智能分析`
+- `重新分析`
+- `执行`
+
+Each run creates a new `studio_ai_analyses` row with `analysis_type=topic_intelligence`. Old versions are retained and shown as `Analysis Version 1`, `Analysis Version 2`, and so on.
+
+Structured result fields:
+
+- `core_summary`
+- `audience`
+- `pain_points`
+- `emotional_triggers`
+- `controversies`
+- `user_quotes`
+- `content_opportunities`
+- `video_direction`
+- `opportunity_score`
 
 ## GPT Director
 

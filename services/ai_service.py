@@ -16,6 +16,11 @@ from services.ai.providers.local_llm import LocalLLMProvider
 from services.ai.providers.openai_provider import OpenAIProvider
 from services.ai.providers.llm_provider import LLMGeneration
 from services.topic_packages import serialize_topic_package
+from services.topic_intelligence_service import (
+    TOPIC_INTELLIGENCE_JOB_TYPE,
+    create_topic_intelligence_job,
+    run_topic_intelligence_job,
+)
 
 
 JOB_TO_ANALYSIS = {
@@ -25,7 +30,7 @@ JOB_TO_ANALYSIS = {
     "video_angle_analysis": ("video_angle", "video_angle"),
 }
 VALID_AI_JOB_STATUSES = {"pending", "running", "completed", "failed", "cancelled"}
-VALID_AI_JOB_TYPES = set(JOB_TO_ANALYSIS)
+VALID_AI_JOB_TYPES = set(JOB_TO_ANALYSIS) | {TOPIC_INTELLIGENCE_JOB_TYPE}
 VALID_EDITORIAL_BRIEF_STATUSES = {"draft", "reviewed", "approved"}
 
 
@@ -178,6 +183,8 @@ def parse_generation(text: str, fallback_type: str) -> dict:
 def create_ai_job(db: Session, topic_package_id: str, job_type: str) -> StudioAIJob:
     if job_type not in VALID_AI_JOB_TYPES:
         raise HTTPException(status_code=422, detail="invalid ai job type")
+    if job_type == TOPIC_INTELLIGENCE_JOB_TYPE:
+        return create_topic_intelligence_job(db, topic_package_id)
     snapshot = topic_input_snapshot(db, topic_package_id)
     job = StudioAIJob(
         job_type=job_type,
@@ -199,6 +206,8 @@ def run_ai_job(db: Session, job_id: str, provider_override=None) -> StudioAIJob:
     job = db.get(StudioAIJob, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="ai job not found")
+    if job.job_type == TOPIC_INTELLIGENCE_JOB_TYPE:
+        return run_topic_intelligence_job(db, job_id, provider_override)
     if job.status == "cancelled":
         raise HTTPException(status_code=422, detail="cancelled job cannot run")
     category, analysis_type = JOB_TO_ANALYSIS.get(job.job_type, ("analysis", "summary"))

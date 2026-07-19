@@ -56,6 +56,7 @@ from services.ai_service import (
     topic_ai_analyses,
     topic_ai_jobs,
 )
+from services.topic_intelligence_service import TOPIC_INTELLIGENCE_JOB_TYPE
 from services.topic_packages import (
     add_items_to_topic_package,
     batch_update_content_status,
@@ -1040,6 +1041,109 @@ def topic_package_items_table(package: dict) -> str:
     )
 
 
+def list_html(values: list, empty_text: str = "暂无") -> str:
+    if not values:
+        return f"<p>{escape(empty_text)}</p>"
+    return "<ul>" + "".join(f"<li>{escape(str(value))}</li>" for value in values) + "</ul>"
+
+
+def topic_intelligence_versions_html(analyses: list[dict]) -> str:
+    topic_items = [item for item in analyses if item.get("analysis_type") == "topic_intelligence"]
+    if not topic_items:
+        return '<div class="placeholder">暂无主题智能分析。点击“生成主题智能分析”后执行任务。</div>'
+    sections = []
+    for index, item in enumerate(reversed(topic_items), start=1):
+        result = item.get("result") or {}
+        audience = result.get("audience") or {}
+        video = result.get("video_direction") or {}
+        score = result.get("opportunity_score") or {}
+        pain_points = result.get("pain_points") or []
+        quotes = result.get("user_quotes") or []
+        opportunities = result.get("content_opportunities") or []
+        pain_html = (
+            "<table><thead><tr><th>问题</th><th>频率</th><th>情绪</th></tr></thead><tbody>"
+            + "".join(
+                "<tr>"
+                f'<td>{escape(str(row.get("problem") or ""))}</td>'
+                f'<td>{escape(str(row.get("frequency") or ""))}</td>'
+                f'<td>{escape(str(row.get("emotion") or ""))}</td>'
+                "</tr>"
+                for row in pain_points
+                if isinstance(row, dict)
+            )
+            + "</tbody></table>"
+            if pain_points
+            else "<p>暂无痛点</p>"
+        )
+        quotes_html = (
+            "<table><thead><tr><th>用户原话</th><th>来源</th><th>互动</th></tr></thead><tbody>"
+            + "".join(
+                "<tr>"
+                f'<td>{escape(str(row.get("quote") or ""))}</td>'
+                f'<td>{escape(str(row.get("source") or ""))}</td>'
+                f'<td>{escape(str(row.get("engagement") or 0))}</td>'
+                "</tr>"
+                for row in quotes
+                if isinstance(row, dict)
+            )
+            + "</tbody></table>"
+            if quotes
+            else "<p>暂无用户原话</p>"
+        )
+        opportunities_html = (
+            "<table><thead><tr><th>内容角度</th><th>理由</th><th>推荐形式</th></tr></thead><tbody>"
+            + "".join(
+                "<tr>"
+                f'<td>{escape(str(row.get("angle") or ""))}</td>'
+                f'<td>{escape(str(row.get("reason") or ""))}</td>'
+                f'<td>{escape(str(row.get("recommended_format") or ""))}</td>'
+                "</tr>"
+                for row in opportunities
+                if isinstance(row, dict)
+            )
+            + "</tbody></table>"
+            if opportunities
+            else "<p>暂无内容机会</p>"
+        )
+        sections.append(
+            f"""
+            <details class="panel" open>
+              <summary><strong>Analysis Version {index}</strong> · {escape(item.get("provider") or "")} / {escape(item.get("model") or "")} · {escape(item.get("created_at") or "")}</summary>
+              <h4>核心总结</h4>
+              <p>{escape(str(result.get("core_summary") or ""))}</p>
+              <h4>用户画像</h4>
+              <p><strong>Persona：</strong>{escape(str(audience.get("persona") or ""))}</p>
+              {list_html(audience.get("needs") or [], "暂无需求")}
+              <h4>痛点分析</h4>
+              {pain_html}
+              <h4>情绪触发点</h4>
+              {list_html(result.get("emotional_triggers") or [], "暂无情绪触发点")}
+              <h4>争议点</h4>
+              {list_html(result.get("controversies") or [], "暂无争议点")}
+              <h4>用户原话</h4>
+              {quotes_html}
+              <h4>内容机会</h4>
+              {opportunities_html}
+              <h4>视频方向</h4>
+              <div class="detail-grid">
+                <div>Hook</div><div>{escape(str(video.get("recommended_hook") or ""))}</div>
+                <div>风格</div><div>{escape(str(video.get("recommended_style") or ""))}</div>
+                <div>目标平台</div><div>{escape(", ".join(str(platform) for platform in video.get("target_platforms") or []))}</div>
+              </div>
+              <h4>机会评分</h4>
+              <div class="grid">
+                <section class="card"><div class="label">Total</div><div class="value">{escape(str(score.get("total", 0)))}</div></section>
+                <section class="card"><div class="label">Engagement</div><div class="value">{escape(str(score.get("engagement", 0)))}</div></section>
+                <section class="card"><div class="label">Comment Quality</div><div class="value">{escape(str(score.get("comment_quality", 0)))}</div></section>
+                <section class="card"><div class="label">Emotion</div><div class="value">{escape(str(score.get("emotion", 0)))}</div></section>
+                <section class="card"><div class="label">Commercial</div><div class="value">{escape(str(score.get("commercial", 0)))}</div></section>
+              </div>
+            </details>
+            """
+        )
+    return "".join(sections)
+
+
 @app.get("/topic-packages/{topic_package_id}", response_class=HTMLResponse)
 def topic_package_detail_page(
     topic_package_id: str,
@@ -1053,6 +1157,7 @@ def topic_package_detail_page(
     package = serialize_topic_package(db, package_row, include_items=True, include_audit=True)
     analyses = topic_ai_analyses(db, topic_package_id)
     jobs = topic_ai_jobs(db, topic_package_id)
+    topic_intelligence_html = topic_intelligence_versions_html(analyses)
     analyses_html = (
         "<table><thead><tr><th>类型</th><th>Provider</th><th>模型</th><th>Prompt版本</th><th>结果</th><th>时间</th></tr></thead><tbody>"
         + "".join(
@@ -1167,10 +1272,18 @@ def topic_package_detail_page(
           <form method="post" action="/topic-packages/{escape(package["id"])}/ai-analyze-form">
             <button class="button" type="submit">AI分析</button>
           </form>
+          <form method="post" action="/topic-packages/{escape(package["id"])}/topic-intelligence-form">
+            <button class="button" type="submit">生成主题智能分析</button>
+          </form>
+          <form method="post" action="/topic-packages/{escape(package["id"])}/topic-intelligence-form">
+            <button class="button secondary" type="submit">重新分析</button>
+          </form>
           <a class="button secondary" href="/gpt-director?topic_package_id={escape(package["id"])}">进入GPT编导</a>
         </div>
         <h3>AI任务</h3>
         {jobs_html}
+        <h3>主题智能分析</h3>
+        {topic_intelligence_html}
         <h3>分析结果</h3>
         {analyses_html}
       </section>
@@ -1360,6 +1473,17 @@ async def topic_ai_analyze_form(topic_package_id: str, db: Session = Depends(get
         create_default_topic_ai_jobs(db, topic_package_id)
         db.commit()
         return RedirectResponse(f"/topic-packages/{topic_package_id}?msg=AI任务已创建", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/topic-packages/{topic_package_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/topic-packages/{topic_package_id}/topic-intelligence-form")
+async def topic_intelligence_form(topic_package_id: str, db: Session = Depends(get_db)):
+    try:
+        create_ai_job(db, topic_package_id, TOPIC_INTELLIGENCE_JOB_TYPE)
+        db.commit()
+        return RedirectResponse(f"/topic-packages/{topic_package_id}?msg=主题智能分析任务已创建", status_code=303)
     except Exception as exc:
         db.rollback()
         return RedirectResponse(f"/topic-packages/{topic_package_id}?level=warn&msg={quote(str(exc))}", status_code=303)
