@@ -31,7 +31,7 @@ JOB_TO_ANALYSIS = {
 }
 VALID_AI_JOB_STATUSES = {"pending", "running", "completed", "failed", "cancelled"}
 VALID_AI_JOB_TYPES = set(JOB_TO_ANALYSIS) | {TOPIC_INTELLIGENCE_JOB_TYPE}
-VALID_EDITORIAL_BRIEF_STATUSES = {"draft", "reviewed", "approved"}
+VALID_EDITORIAL_BRIEF_STATUSES = {"draft", "reviewing", "approved", "archived", "ready_for_video"}
 
 
 def get_ai_provider(provider_name: Optional[str] = None):
@@ -286,6 +286,7 @@ def save_editorial_brief(db: Session, topic_package_id: str, prompt_snapshot: st
         version="1.0",
         prompt_snapshot=prompt_snapshot,
         input_json=stable_json(parsed),
+        output_json=stable_json(parsed),
         status="draft",
     )
     db.add(row)
@@ -299,7 +300,7 @@ def serialize_editorial_brief(row: StudioEditorialBrief) -> dict:
         "topic_package_id": row.topic_package_id,
         "version": row.version,
         "prompt_snapshot": row.prompt_snapshot,
-        "input": parse_json(row.input_json, {}),
+        "input": parse_json(row.output_json, {}) or parse_json(row.input_json, {}),
         "status": row.status,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,

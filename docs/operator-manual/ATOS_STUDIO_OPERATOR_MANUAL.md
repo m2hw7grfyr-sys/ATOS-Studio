@@ -72,7 +72,10 @@ GPT 编导页用于把主题包和 AI 分析结果整理成可复制给 ChatGPT 
 - 查看主题包输入
 - 查看 AI 分析结果
 - 生成 GPT Prompt 文本
-- 粘贴并保存 Editorial Brief JSON 草稿
+- 复制 Prompt 到 ChatGPT
+- 粘贴并保存 GPT 返回的 Editorial Brief JSON
+- 查看 Editorial Brief 历史版本
+- 将 Brief 标记为审核中或已批准
 
 ## 4. 按钮说明
 
@@ -103,7 +106,11 @@ GPT 编导页用于把主题包和 AI 分析结果整理成可复制给 ChatGPT 
 | 按钮 | 功能 | 输入 | 输出 | 注意事项 |
 | --- | --- | --- | --- | --- |
 | 加载 | 加载所选主题包 | 主题包 | 输入区刷新 | 不调用 AI |
-| 保存草稿 | 保存人工粘贴的 JSON | Editorial Brief JSON | draft | JSON 必须合法 |
+| 生成GPT Prompt | 根据主题包和主题智能分析生成 Prompt | 主题包 | 可复制 Prompt | 不调用 GPT API |
+| 复制Prompt | 复制 Prompt 到剪贴板 | Prompt 文本 | 剪贴板内容 | 需要浏览器支持剪贴板 |
+| 解析并保存 | 校验并保存 GPT 返回 JSON | GPT Output JSON | 新 Editorial Brief 版本 | JSON 必须符合字段要求 |
+| 进入审核 | 将 Brief 状态改为 reviewing | Brief | 状态更新 | 不影响旧版本 |
+| 批准 | 将 Brief 状态改为 approved | Brief | 状态更新 | 为后续视频生产准备 |
 
 ## 5. AI说明
 
@@ -227,7 +234,123 @@ GPT 编导会读取：
 
 然后生成可复制给 ChatGPT 的编导 Prompt。
 
-## 7. 常见问题
+## 7. GPT编导交换区操作说明
+
+### 什么时候使用GPT编导
+
+当主题包已经完成主题智能分析，并且你准备把它整理成短视频编导方案时，使用 GPT 编导。
+
+不要在以下情况使用：
+
+- 主题包没有来源内容。
+- 主题包还没有主题智能分析。
+- 主题仍处于高风险或不确定状态。
+- 你还没有确认该主题适合进入内容生产。
+
+### 如何生成Prompt
+
+1. 打开 `主题包`。
+2. 进入一个已完成主题智能分析的主题包。
+3. 点击 `进入GPT编导`。
+4. 在 GPT 编导页点击 `生成GPT Prompt`。
+5. 页面会生成完整 Prompt。
+
+Prompt 会包含：
+
+- 主题包信息
+- 来源数量
+- 平台分布
+- 核心总结
+- 用户画像
+- 痛点
+- 用户原话
+- 内容机会
+- 输出 JSON 格式要求
+
+### 如何复制Prompt到ChatGPT
+
+1. 点击 `复制Prompt`。
+2. 打开 ChatGPT。
+3. 粘贴 Prompt。
+4. 等待 ChatGPT 输出 JSON。
+
+当前系统不会自动调用 OpenAI API，也不会替你完成 ChatGPT 对话。
+
+### 如何处理GPT返回结果
+
+ChatGPT 返回内容必须是 JSON。
+
+必须包含：
+
+- title
+- hook
+- script
+- scenes
+- caption
+
+每个 scene 必须包含：
+
+- scene_number
+- duration
+- visual_prompt
+- voiceover
+- subtitle
+
+可选字段：
+
+- camera_direction
+- target_audience
+- hashtags
+
+### 如何粘贴JSON
+
+1. 回到 GPT 编导页。
+2. 找到 `GPT Output JSON`。
+3. 粘贴 ChatGPT 返回的完整 JSON。
+4. 点击 `解析并保存`。
+
+如果 JSON 不合法，系统会提示具体错误，例如：
+
+- GPT Output JSON 不是合法 JSON
+- 缺少 scenes 字段
+- scenes 字段不能为空
+- 第 1 个 scene 缺少 voiceover 字段
+
+### 如何审核脚本
+
+保存后，系统会生成一个新的 Editorial Brief 版本。
+
+你需要检查：
+
+- 标题是否准确
+- Hook 是否抓住核心痛点
+- 脚本是否符合平台风格
+- 分镜是否能被后续视频系统理解
+- voiceover 和 subtitle 是否清晰
+- visual_prompt 是否可用于图像或视频生成
+
+### 如何批准进入下一阶段
+
+检查无误后点击 `批准`。
+
+批准后状态变为：
+
+`approved`
+
+未来视频生产模块会读取已批准的 Editorial Brief。
+
+### 操作人员不需要理解的内容
+
+操作人员只需要按页面流程操作，不需要理解：
+
+- LLM
+- API
+- 数据库
+- Prompt Template 内部结构
+- 视频模型
+- ComfyUI
+
+## 8. 常见问题
 
 ### AI任务失败
 
@@ -257,7 +380,7 @@ GPT 编导会读取：
 }
 ```
 
-## 8. 当前未实现能力
+## 9. 当前未实现能力
 
 - 视频生成
 - ComfyUI

@@ -340,15 +340,54 @@ Structured result fields:
 
 ## GPT Director
 
-The GPT director page prepares a copyable prompt from:
+The GPT director page is now the Editorial Studio. It prepares a copyable prompt from:
 
 - Topic package title
 - Topic package sources
 - AI analyses
+- Latest topic intelligence result
 
-It also stores manually pasted Editorial Brief JSON as `draft`.
+It also stores manually pasted GPT Output JSON as versioned Editorial Briefs.
 
-Sprint 05 does not generate a final video script.
+Sprint 07 does not call GPT APIs and does not generate video. The operator manually copies the generated prompt into ChatGPT, then pastes the returned JSON back into Studio.
+
+Open:
+
+```text
+http://127.0.0.1:8502/gpt-director
+```
+
+Prompt builder:
+
+```bash
+curl "http://127.0.0.1:8502/api/topic-packages/{topic_package_id}/editorial-prompt"
+```
+
+Save GPT Output JSON:
+
+```bash
+curl -X POST http://127.0.0.1:8502/api/editorial-briefs \
+  -H "Content-Type: application/json" \
+  -d '{"topic_package_id":"uuid","prompt_snapshot":"prompt text","output_json":{"title":"...","hook":"...","script":"...","scenes":[{"scene_number":1,"duration":5,"visual_prompt":"...","voiceover":"...","subtitle":"..."}],"caption":"...","hashtags":[]}}'
+```
+
+Required GPT Output JSON fields:
+
+- `title`
+- `hook`
+- `script`
+- `scenes`
+- `caption`
+
+Each scene requires:
+
+- `scene_number`
+- `duration`
+- `visual_prompt`
+- `voiceover`
+- `subtitle`
+
+Each save creates a new version. Old versions are retained and visible in the Editorial Studio page.
 
 ## Idempotency
 

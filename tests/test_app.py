@@ -1,4 +1,5 @@
 import os
+import json
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -18,6 +19,7 @@ from services.topic_intelligence_service import (
     TOPIC_INTELLIGENCE_JOB_TYPE,
     build_topic_intelligence_context,
 )
+from schemas.editorial_brief import validate_editorial_brief_json
 
 
 client = TestClient(app)
@@ -486,18 +488,7 @@ class ContentPoolTests(unittest.TestCase):
 
         director = self.client.get("/gpt-director", params={"topic_package_id": package["id"]})
         self.assertEqual(director.status_code, 200)
-        self.assertIn("生成GPT Prompt", director.text)
-
-        brief = self.client.post(
-            "/api/editorial-briefs",
-            json={
-                "topic_package_id": package["id"],
-                "prompt_snapshot": "prompt",
-                "input_json": '{"hook":"test"}',
-            },
-        )
-        self.assertEqual(brief.status_code, 200)
-        self.assertEqual(brief.json()["status"], "draft")
+        self.assertIn("Editorial Studio", director.text)
 
     def test_ai_job_failure_is_stored_without_crashing(self):
         item_id = self.create_pushed_item("ai-fail-topic", "AI fail topic candidate")
@@ -654,6 +645,129 @@ class ContentPoolTests(unittest.TestCase):
         self.assertEqual(failed.status_code, 200)
         self.assertEqual(failed.json()["status"], "failed")
         self.assertIn("Expecting value", failed.json()["error_message"])
+
+    def create_topic_intelligence_analysis(self, package_id: str):
+        self.create_prompt("topic_intelligence")
+
+        class TopicProvider:
+            provider_name = "fake-topic"
+
+            def get_model_info(self):
+                return {"model": "topic-model"}
+
+            def generate(self, prompt: str):
+                return LLMGeneration(
+                    text=(
+                        '{"core_summary":"Users want practical short advice.",'
+                        '"audience":{"persona":"ADHD adults","needs":["clarity"]},'
+                        '"pain_points":[{"problem":"too many steps","frequency":"high","emotion":"overwhelmed"}],'
+                        '"emotional_triggers":["friction"],'
+                        '"controversies":[],'
+                        '"user_quotes":[{"quote":"I need fewer steps","source":"https://example.com","engagement":9}],'
+                        '"content_opportunities":[{"angle":"two-step method","reason":"clear pain","recommended_format":"short video"}],'
+                        '"video_direction":{"recommended_hook":"Stop overbuilding your planner","recommended_style":"supportive","target_platforms":["tiktok"]},'
+                        '"opportunity_score":{"total":80,"engagement":20,"comment_quality":20,"emotion":20,"commercial":20}}'
+                    ),
+                    provider="fake-topic",
+                    model="topic-model",
+                )
+
+        job = self.client.post(
+            f"/api/topic-packages/{package_id}/ai-jobs",
+            params={"job_type": TOPIC_INTELLIGENCE_JOB_TYPE},
+        ).json()["items"][0]["id"]
+        with patch("services.ai_service.get_ai_provider", return_value=TopicProvider()):
+            response = self.client.post(f"/api/ai/jobs/{job}/run")
+        self.assertEqual(response.json()["status"], "completed")
+
+    def valid_editorial_output(self, title="Planner Reset"):
+        return {
+            "title": title,
+            "hook": "Stop overbuilding your planner",
+            "target_audience": "ADHD adults",
+            "script": "A short script about reducing planning friction.",
+            "scenes": [
+                {
+                    "scene_number": 1,
+                    "duration": 5,
+                    "visual_prompt": "A cluttered planner on a desk",
+                    "voiceover": "Your planner may be creating more friction.",
+                    "subtitle": "Your planner may be the problem",
+                    "camera_direction": "close-up",
+                }
+            ],
+            "caption": "A simpler planning reset.",
+            "hashtags": ["ADHD", "planning"],
+        }
+
+    def test_editorial_prompt_builder_json_validation_versioning_and_page(self):
+        item_id = self.create_pushed_item("editorial-1", "ADHD planners can become another chore", 90, 12, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "ADHD planner friction", "content_item_ids": [item_id]},
+        ).json()
+
+        missing = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        self.assertEqual(missing.status_code, 422)
+        self.assertIn("缺少主题智能分析结果", missing.text)
+
+        self.create_topic_intelligence_analysis(package["id"])
+        missing_template = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        self.assertEqual(missing_template.status_code, 422)
+        self.assertIn("editorial", missing_template.text)
+        template = self.create_prompt("editorial")
+        prompt = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        self.assertEqual(prompt.status_code, 200)
+        self.assertIn("素材上下文 JSON", prompt.json()["prompt"])
+        self.assertEqual(prompt.json()["prompt_template_id"], template["id"])
+
+        valid_output = self.valid_editorial_output()
+        parsed = validate_editorial_brief_json(json.dumps(valid_output))
+        self.assertEqual(parsed["scenes"][0]["camera_direction"], "close-up")
+        with self.assertRaises(ValueError):
+            validate_editorial_brief_json("not json")
+        with self.assertRaises(ValueError):
+            validate_editorial_brief_json('{"title":"x","hook":"x","script":"x","caption":"x"}')
+        with self.assertRaises(ValueError):
+            validate_editorial_brief_json('{"title":"x","hook":"x","script":"x","scenes":[],"caption":"x"}')
+
+        first = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": valid_output,
+            },
+        )
+        second_output = self.valid_editorial_output("Planner Reset V2")
+        second = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": json.dumps(second_output),
+            },
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json()["version"], "1")
+        self.assertEqual(second.json()["version"], "2")
+        self.assertEqual(second.json()["output"]["title"], "Planner Reset V2")
+
+        updated = self.client.patch(f"/api/editorial-briefs/{second.json()['id']}/status", json={"status": "approved"})
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["status"], "approved")
+
+        page = self.client.get("/gpt-director", params={"topic_package_id": package["id"], "generate": 1})
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("素材上下文", page.text)
+        self.assertIn("生成GPT Prompt", page.text)
+        self.assertIn("GPT Output JSON", page.text)
+        self.assertIn("Version 1", page.text)
+        self.assertIn("Version 2", page.text)
+        self.assertIn("Planner Reset V2", page.text)
 
 
 if __name__ == "__main__":

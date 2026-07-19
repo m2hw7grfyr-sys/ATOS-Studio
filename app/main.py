@@ -46,15 +46,19 @@ from services.ai_service import (
     create_ai_job,
     create_default_topic_ai_jobs,
     create_prompt_template,
-    generate_gpt_director_prompt,
     list_prompt_templates,
     run_ai_job,
-    save_editorial_brief,
     serialize_ai_job,
-    serialize_editorial_brief,
     serialize_prompt_template,
     topic_ai_analyses,
     topic_ai_jobs,
+)
+from services.gpt_prompt_builder import (
+    build_editorial_prompt,
+    editorial_context,
+    save_editorial_output,
+    serialize_editorial_brief,
+    update_editorial_brief_status,
 )
 from services.topic_intelligence_service import TOPIC_INTELLIGENCE_JOB_TYPE
 from services.topic_packages import (
@@ -1467,6 +1471,11 @@ def topic_ai_analyses_api(topic_package_id: str, db: Session = Depends(get_db)) 
     return {"items": topic_ai_analyses(db, topic_package_id)}
 
 
+@app.get("/api/topic-packages/{topic_package_id}/editorial-prompt")
+def topic_editorial_prompt_api(topic_package_id: str, db: Session = Depends(get_db)) -> dict:
+    return build_editorial_prompt(db, topic_package_id)
+
+
 @app.post("/topic-packages/{topic_package_id}/ai-analyze-form")
 async def topic_ai_analyze_form(topic_package_id: str, db: Session = Depends(get_db)):
     try:
@@ -1504,43 +1513,124 @@ async def ai_job_run_form(job_id: str, request: Request, db: Session = Depends(g
 
 
 @app.get("/gpt-director", response_class=HTMLResponse)
-def gpt_director_page(topic_package_id: str = "", msg: str = "", level: str = "ok", db: Session = Depends(get_db)) -> HTMLResponse:
+def gpt_director_page(
+    topic_package_id: str = "",
+    generate: int = 0,
+    msg: str = "",
+    level: str = "ok",
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
     packages = list_topic_packages(db, limit=100)["items"]
     selected_id = topic_package_id or (packages[0]["id"] if packages else "")
-    prompt_text = generate_gpt_director_prompt(db, selected_id) if selected_id else ""
-    analyses = topic_ai_analyses(db, selected_id) if selected_id else []
     selected = db.get(StudioTopicPackage, selected_id) if selected_id else None
+    context = {}
+    prompt_payload = {}
+    prompt_text = ""
+    prompt_template_id = ""
+    context_notice = ""
+    if selected_id:
+        try:
+            context = editorial_context(db, selected_id)
+            if generate:
+                prompt_payload = build_editorial_prompt(db, selected_id)
+                prompt_text = prompt_payload["prompt"]
+                prompt_template_id = prompt_payload["prompt_template_id"]
+        except Exception as exc:
+            context_notice = str(exc)
     saved_briefs = []
     if selected_id:
-        saved_briefs = db.scalars(
+        saved_briefs = [
+            serialize_editorial_brief(row)
+            for row in db.scalars(
             select(StudioEditorialBrief)
             .where(StudioEditorialBrief.topic_package_id == selected_id)
-            .order_by(StudioEditorialBrief.updated_at.desc())
+                .order_by(StudioEditorialBrief.created_at.desc())
             .limit(20)
-        ).all()
+            ).all()
+        ]
     options = "".join(
         f'<option value="{escape(package["id"])}" {"selected" if package["id"] == selected_id else ""}>{escape(package["title"])}</option>'
         for package in packages
     )
-    analyses_html = "<pre>" + escape(json.dumps(analyses, ensure_ascii=False, indent=2)) + "</pre>" if analyses else '<div class="placeholder">该主题包暂无 AI 分析结果</div>'
-    briefs_html = (
-        "<table><thead><tr><th>版本</th><th>状态</th><th>创建时间</th><th>内容</th></tr></thead><tbody>"
+    topic_context = context.get("topic_package") or {}
+    intelligence = context.get("topic_intelligence") or {}
+    audience = intelligence.get("audience") or {}
+    platform_distribution = topic_context.get("platform_distribution") or {}
+    pain_points = intelligence.get("pain_points") or []
+    quotes = intelligence.get("user_quotes") or []
+    opportunities = intelligence.get("content_opportunities") or []
+    pain_html = (
+        "<table><thead><tr><th>问题</th><th>频率</th><th>情绪</th></tr></thead><tbody>"
         + "".join(
             "<tr>"
-            f"<td>{escape(row.version)}</td>"
-            f"<td>{escape(row.status)}</td>"
-            f"<td>{escape(row.created_at.isoformat() if row.created_at else '')}</td>"
-            f"<td><pre>{escape(row.input_json)}</pre></td>"
+            f'<td>{escape(str(row.get("problem") or ""))}</td>'
+            f'<td>{escape(str(row.get("frequency") or ""))}</td>'
+            f'<td>{escape(str(row.get("emotion") or ""))}</td>'
+            "</tr>"
+            for row in pain_points
+            if isinstance(row, dict)
+        )
+        + "</tbody></table>"
+        if pain_points
+        else '<div class="placeholder">暂无痛点分析</div>'
+    )
+    quotes_html = (
+        "<table><thead><tr><th>用户原话</th><th>来源</th><th>互动</th></tr></thead><tbody>"
+        + "".join(
+            "<tr>"
+            f'<td>{escape(str(row.get("quote") or ""))}</td>'
+            f'<td>{escape(str(row.get("source") or ""))}</td>'
+            f'<td>{escape(str(row.get("engagement") or 0))}</td>'
+            "</tr>"
+            for row in quotes
+            if isinstance(row, dict)
+        )
+        + "</tbody></table>"
+        if quotes
+        else '<div class="placeholder">暂无用户原话</div>'
+    )
+    opportunities_html = (
+        "<table><thead><tr><th>角度</th><th>理由</th><th>形式</th></tr></thead><tbody>"
+        + "".join(
+            "<tr>"
+            f'<td>{escape(str(row.get("angle") or ""))}</td>'
+            f'<td>{escape(str(row.get("reason") or ""))}</td>'
+            f'<td>{escape(str(row.get("recommended_format") or ""))}</td>'
+            "</tr>"
+            for row in opportunities
+            if isinstance(row, dict)
+        )
+        + "</tbody></table>"
+        if opportunities
+        else '<div class="placeholder">暂无内容机会</div>'
+    )
+    briefs_html = (
+        "<table><thead><tr><th>版本</th><th>状态</th><th>创建人</th><th>创建时间</th><th>标题</th><th>Hook</th><th>内容</th><th>操作</th></tr></thead><tbody>"
+        + "".join(
+            "<tr>"
+            f'<td>Version {escape(row["version"])}</td>'
+            f'<td>{escape(row["status"])}</td>'
+            f'<td>{escape(row.get("created_by") or "")}</td>'
+            f'<td>{escape(row.get("created_at") or "")}</td>'
+            f'<td>{escape(str((row.get("output") or {}).get("title") or ""))}</td>'
+            f'<td>{escape(str((row.get("output") or {}).get("hook") or ""))}</td>'
+            f'<td><details><summary>查看旧版本</summary><pre>{escape(json.dumps(row.get("output") or {}, ensure_ascii=False, indent=2))}</pre></details></td>'
+            '<td><div class="actions">'
+            f'<form method="post" action="/gpt-director/brief-status-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="brief_id" value="{escape(row["id"])}"><input type="hidden" name="status" value="reviewing"><button class="button secondary" type="submit">进入审核</button></form>'
+            f'<form method="post" action="/gpt-director/brief-status-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="brief_id" value="{escape(row["id"])}"><input type="hidden" name="status" value="approved"><button class="button" type="submit">批准</button></form>'
+            "</div></td>"
             "</tr>"
             for row in saved_briefs
         )
         + "</tbody></table>"
         if saved_briefs
-        else '<div class="placeholder">暂无 Editorial Brief 草稿</div>'
+        else '<div class="placeholder">暂无 Editorial Brief 版本</div>'
     )
+    prompt_notice = message_html(context_notice, "warn") if context_notice else ""
+    prompt_form_action = f"/gpt-director?topic_package_id={escape(selected_id)}&generate=1"
     body = f"""
       <h1>GPT编导</h1>
-      <p class="subtitle">本页只生成可复制给 ChatGPT 的 Prompt，并保存人工粘贴回来的 Editorial Brief 草稿。</p>
+      <p class="subtitle">Editorial Studio：整理 AI 分析结果，生成可复制给 ChatGPT 的 Prompt，并保存人工粘贴回来的视频编导 JSON。</p>
       {message_html(msg, level)}
       <section class="panel">
         <form method="get" action="/gpt-director" class="toolbar">
@@ -1549,30 +1639,44 @@ def gpt_director_page(topic_package_id: str = "", msg: str = "", level: str = "o
         </form>
       </section>
       <section class="panel">
-        <h2>主题包输入</h2>
+        <h2>素材上下文</h2>
+        {prompt_notice}
         <div class="detail-grid">
-          <div>标题</div><div>{escape(selected.title if selected else "")}</div>
-          <div>状态</div><div>{escape(selected.status if selected else "")}</div>
-          <div>摘要</div><div>{escape(selected.summary if selected else "")}</div>
+          <div>主题包</div><div>{escape(selected.title if selected else "")}</div>
+          <div>来源数量</div><div>{escape(str(topic_context.get("source_count") or ""))}</div>
+          <div>平台分布</div><div>{escape(json.dumps(platform_distribution, ensure_ascii=False))}</div>
+          <div>核心总结</div><div>{escape(str(intelligence.get("core_summary") or ""))}</div>
+          <div>用户画像</div><div>{escape(str(audience.get("persona") or ""))}</div>
         </div>
-        <h3>AI分析结果</h3>
-        {analyses_html}
+        <h3>痛点</h3>
+        {pain_html}
+        <h3>用户原话</h3>
+        {quotes_html}
+        <h3>内容机会</h3>
+        {opportunities_html}
       </section>
       <section class="panel">
         <h2>生成GPT Prompt</h2>
-        <textarea class="field" style="width: 100%; min-height: 340px;">{escape(prompt_text)}</textarea>
+        <form method="get" action="/gpt-director" class="toolbar">
+          <input type="hidden" name="topic_package_id" value="{escape(selected_id)}">
+          <input type="hidden" name="generate" value="1">
+          <button class="button" type="submit">生成GPT Prompt</button>
+        </form>
+        <textarea id="gpt-prompt" class="field" style="width: 100%; min-height: 340px;">{escape(prompt_text)}</textarea>
+        <button class="button secondary" type="button" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('gpt-prompt').value)">复制Prompt</button>
       </section>
       <section class="panel">
-        <h2>JSON接收区</h2>
+        <h2>GPT结果输入</h2>
         <form method="post" action="/gpt-director/save-brief-form" class="toolbar">
           <input type="hidden" name="topic_package_id" value="{escape(selected_id)}">
           <input type="hidden" name="prompt_snapshot" value="{escape(prompt_text)}">
-          <label style="width:100%">Editorial Brief JSON<br><textarea class="field" style="width:100%; min-height:180px;" name="input_json">{{}}</textarea></label>
-          <button class="button" type="submit">保存草稿</button>
+          <input type="hidden" name="prompt_template_id" value="{escape(prompt_template_id)}">
+          <label style="width:100%">GPT Output JSON<br><textarea class="field" style="width:100%; min-height:220px;" name="output_json">{{}}</textarea></label>
+          <button class="button" type="submit">解析并保存</button>
         </form>
       </section>
       <section class="panel">
-        <h2>已保存草稿</h2>
+        <h2>Editorial Brief 历史版本</h2>
         {briefs_html}
       </section>
     """
@@ -1584,14 +1688,30 @@ async def gpt_director_save_brief_form(request: Request, db: Session = Depends(g
     form = await parse_urlencoded(request)
     topic_package_id = form.get("topic_package_id", "")
     try:
-        save_editorial_brief(
+        save_editorial_output(
             db,
             topic_package_id,
             form.get("prompt_snapshot", ""),
-            form.get("input_json", "{}"),
+            form.get("output_json", "{}"),
+            prompt_template_id=form.get("prompt_template_id") or None,
+            created_by="operator",
+            status="draft",
         )
         db.commit()
-        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&msg=Editorial Brief 草稿已保存", status_code=303)
+        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&msg=Editorial Brief 版本已保存", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/gpt-director/brief-status-form")
+async def gpt_director_brief_status_form(request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    topic_package_id = form.get("topic_package_id", "")
+    try:
+        update_editorial_brief_status(db, form.get("brief_id", ""), form.get("status", ""))
+        db.commit()
+        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&msg=Editorial Brief 状态已更新", status_code=303)
     except Exception as exc:
         db.rollback()
         return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&level=warn&msg={quote(str(exc))}", status_code=303)
@@ -1599,12 +1719,24 @@ async def gpt_director_save_brief_form(request: Request, db: Session = Depends(g
 
 @app.post("/api/editorial-briefs")
 def create_editorial_brief_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
-    row = save_editorial_brief(
+    output_value = payload.get("output_json") if "output_json" in payload else payload.get("input_json", "{}")
+    output_text = output_value if isinstance(output_value, str) else json.dumps(output_value, ensure_ascii=False)
+    row = save_editorial_output(
         db,
         str(payload.get("topic_package_id") or ""),
         str(payload.get("prompt_snapshot") or ""),
-        str(payload.get("input_json") or "{}"),
+        output_text,
+        prompt_template_id=payload.get("prompt_template_id"),
+        created_by=str(payload.get("created_by") or "operator"),
+        status=str(payload.get("status") or "draft"),
     )
+    db.commit()
+    return serialize_editorial_brief(row)
+
+
+@app.patch("/api/editorial-briefs/{brief_id}/status")
+def update_editorial_brief_status_api(brief_id: str, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = update_editorial_brief_status(db, brief_id, str(payload.get("status") or ""))
     db.commit()
     return serialize_editorial_brief(row)
 

@@ -71,8 +71,12 @@ class StudioEditorialBrief(Base):
         index=True,
     )
     version: Mapped[str] = mapped_column(String(40), default="1.0")
+    prompt_template_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_prompt_templates.id"))
     prompt_snapshot: Mapped[str] = mapped_column(Text, default="")
+    input_context_json: Mapped[str] = mapped_column(Text, default="{}")
     input_json: Mapped[str] = mapped_column(Text, default="{}")
+    output_json: Mapped[str] = mapped_column(Text, default="{}")
     status: Mapped[str] = mapped_column(String(40), default="draft", index=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
