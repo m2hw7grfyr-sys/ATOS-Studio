@@ -18,6 +18,12 @@ Sprint 04 adds manual review and topic packages:
 studio_content_items -> manual review -> studio_topic_packages -> package approval
 ```
 
+Sprint 05 adds the AI foundation:
+
+```text
+studio_topic_packages -> AI jobs -> AI analyses -> GPT director prompt -> editorial brief draft
+```
+
 Video generation, ComfyUI, Wan, TTS, subtitles, FFmpeg, cloud backup, automatic ingestion, clustering, and shared user login are not implemented.
 
 ## Environment
@@ -50,6 +56,19 @@ ATOS_REQUEST_TIMEOUT_SECONDS=10
 STUDIO_PUSH_AUTH_ENABLED=true
 STUDIO_PUSH_API_TOKEN=replace-with-the-same-token
 STUDIO_DATABASE_URL=sqlite:///./storage/atos_studio.db
+AI_PROVIDER=local
+AI_DEFAULT_MODEL=qwen3
+AI_TIMEOUT_SECONDS=120
+AI_MAX_TOKENS=1200
+AI_TEMPERATURE=0.3
+AI_OUTPUT_FORMAT=json
+LOCAL_LLM_TYPE=ollama
+LOCAL_LLM_URL=http://127.0.0.1:11434
+LOCAL_LLM_MODEL=qwen3
+LOCAL_LLM_TIMEOUT_SECONDS=120
+OPENAI_ENABLED=false
+OPENAI_API_KEY=
+OPENAI_MODEL=
 ```
 
 Do not commit `.env`.
@@ -221,7 +240,59 @@ Open pages:
 ```text
 http://127.0.0.1:8502/content-pool
 http://127.0.0.1:8502/topic-packages
+http://127.0.0.1:8502/gpt-director
 ```
+
+## AI Foundation
+
+Studio AI uses a provider interface. Business code calls the Studio AI Service, not Ollama, vLLM, or OpenAI directly.
+
+Provider strategy:
+
+1. Local provider first, default.
+2. OpenAI provider optional and disabled by default.
+
+Health:
+
+```bash
+curl http://127.0.0.1:8502/api/ai/health
+```
+
+Prompt templates:
+
+```text
+GET  /api/prompt-templates
+POST /api/prompt-templates
+```
+
+AI jobs:
+
+```text
+POST /api/topic-packages/{topic_package_id}/ai-jobs
+POST /api/ai/jobs/{job_id}/run
+GET  /api/topic-packages/{topic_package_id}/ai-analyses
+```
+
+Default job types:
+
+- `topic_summary`
+- `pain_point_analysis`
+- `comment_analysis`
+- `video_angle_analysis`
+
+OpenAI API keys are never returned by API responses and must not be committed.
+
+## GPT Director
+
+The GPT director page prepares a copyable prompt from:
+
+- Topic package title
+- Topic package sources
+- AI analyses
+
+It also stores manually pasted Editorial Brief JSON as `draft`.
+
+Sprint 05 does not generate a final video script.
 
 ## Idempotency
 

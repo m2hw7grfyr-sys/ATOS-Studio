@@ -6,7 +6,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from database import Base, get_database_url
-from models import content_item  # noqa: F401
+import models  # noqa: F401
 
 
 config = context.config
@@ -43,4 +43,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

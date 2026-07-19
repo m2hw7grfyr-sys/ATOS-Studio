@@ -30,6 +30,20 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     studio_env: str = "development"
     studio_version: str = "0.1.0"
+    ai_provider: str = "local"
+    ai_default_model: str = "qwen3"
+    ai_timeout_seconds: float = 120
+    ai_max_tokens: int = 1200
+    ai_temperature: float = 0.3
+    ai_output_format: str = "json"
+    local_llm_type: str = "ollama"
+    local_llm_url: str = "http://127.0.0.1:11434"
+    local_llm_model: str = "qwen3"
+    local_llm_timeout_seconds: float = 120
+    openai_enabled: bool = False
+    openai_api_key: str = ""
+    openai_model: str = ""
+    openai_timeout_seconds: float = 120
 
     model_config = SettingsConfigDict(
         env_file=(ROOT_DIR / ".env",),

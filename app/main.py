@@ -6,14 +6,15 @@ from html import escape
 from urllib.parse import quote, parse_qs
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from config.settings import get_settings
 from database import get_db
 from models.content_item import StudioContentItem
+from models.ai import StudioEditorialBrief
 from models.topic_package import StudioTopicPackage
 from models.schemas import (
     ContentItemStatusBatchRequest,
@@ -40,6 +41,21 @@ from models.schemas import (
 from repositories.content_items import ContentItemRepository, serialize_item
 from services.atos_client import AtosAuthError, AtosClient, AtosClientError, AtosNotFoundError, AtosUnavailableError
 from services.status import build_health_payload, build_status_cards
+from services.ai_service import (
+    ai_health_payload,
+    create_ai_job,
+    create_default_topic_ai_jobs,
+    create_prompt_template,
+    generate_gpt_director_prompt,
+    list_prompt_templates,
+    run_ai_job,
+    save_editorial_brief,
+    serialize_ai_job,
+    serialize_editorial_brief,
+    serialize_prompt_template,
+    topic_ai_analyses,
+    topic_ai_jobs,
+)
 from services.topic_packages import (
     add_items_to_topic_package,
     batch_update_content_status,
@@ -73,6 +89,7 @@ NAV_ITEMS = [
     ("inspiration", "/inspiration", "灵感中心"),
     ("content-pool", "/content-pool", "内容池"),
     ("topic-packages", "/topic-packages", "主题包"),
+    ("gpt-director", "/gpt-director", "GPT编导"),
     ("video-projects", "/video-projects", "视频项目"),
     ("generation-queue", "/generation-queue", "生成队列"),
     ("assets", "/assets", "素材库"),
@@ -83,6 +100,7 @@ NAV_ITEMS = [
 PLACEHOLDER_PAGES = {
     "inspiration": "灵感中心",
     "video-projects": "视频项目",
+    "gpt-director": "GPT编导",
     "generation-queue": "生成队列",
     "assets": "素材库",
     "renders": "成片库",
@@ -1033,6 +1051,42 @@ def topic_package_detail_page(
     if not package_row:
         raise HTTPException(status_code=404, detail="topic package not found")
     package = serialize_topic_package(db, package_row, include_items=True, include_audit=True)
+    analyses = topic_ai_analyses(db, topic_package_id)
+    jobs = topic_ai_jobs(db, topic_package_id)
+    analyses_html = (
+        "<table><thead><tr><th>类型</th><th>Provider</th><th>模型</th><th>Prompt版本</th><th>结果</th><th>时间</th></tr></thead><tbody>"
+        + "".join(
+            "<tr>"
+            f'<td>{escape(item["analysis_type"])}</td>'
+            f'<td>{escape(item["provider"])}</td>'
+            f'<td>{escape(item["model"])}</td>'
+            f'<td>{escape(item["prompt_version"])}</td>'
+            f'<td><pre>{escape(json.dumps(item["result"], ensure_ascii=False, indent=2))}</pre></td>'
+            f'<td>{escape(item.get("updated_at") or "")}</td>'
+            "</tr>"
+            for item in analyses
+        )
+        + "</tbody></table>"
+        if analyses
+        else '<div class="placeholder">暂无 AI Insights。点击 AI分析 后创建任务，再执行待处理任务。</div>'
+    )
+    jobs_html = (
+        "<table><thead><tr><th>任务类型</th><th>状态</th><th>Provider</th><th>模型</th><th>错误</th><th>操作</th></tr></thead><tbody>"
+        + "".join(
+            "<tr>"
+            f'<td>{escape(item["job_type"])}</td>'
+            f'<td>{escape(item["status"])}</td>'
+            f'<td>{escape(item.get("provider") or "")}</td>'
+            f'<td>{escape(item.get("model") or "")}</td>'
+            f'<td>{escape(item.get("error_message") or "")}</td>'
+            f'<td><form method="post" action="/ai/jobs/{escape(item["id"])}/run-form"><input type="hidden" name="topic_package_id" value="{escape(topic_package_id)}"><button class="button secondary" type="submit">执行</button></form></td>'
+            "</tr>"
+            for item in jobs
+        )
+        + "</tbody></table>"
+        if jobs
+        else '<div class="placeholder">暂无 AI 任务</div>'
+    )
     similar_html = (
         "<table><thead><tr><th>标题</th><th>原因</th><th>状态</th><th>来源数</th><th>操作</th></tr></thead><tbody>"
         + "".join(
@@ -1106,6 +1160,19 @@ def topic_package_detail_page(
       <section class="panel">
         <h2>来源内容列表</h2>
         {topic_package_items_table(package)}
+      </section>
+      <section class="panel">
+        <h2>AI Insights</h2>
+        <div class="actions">
+          <form method="post" action="/topic-packages/{escape(package["id"])}/ai-analyze-form">
+            <button class="button" type="submit">AI分析</button>
+          </form>
+          <a class="button secondary" href="/gpt-director?topic_package_id={escape(package["id"])}">进入GPT编导</a>
+        </div>
+        <h3>AI任务</h3>
+        {jobs_html}
+        <h3>分析结果</h3>
+        {analyses_html}
       </section>
       <section class="panel">
         <h2>相似主题提示</h2>
@@ -1241,6 +1308,181 @@ async def topic_package_merge_form(request: Request, db: Session = Depends(get_d
         db.rollback()
         target = target_id or ""
         return RedirectResponse(f"/topic-packages/{target}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.get("/api/ai/health")
+def ai_health_api() -> dict:
+    return ai_health_payload()
+
+
+@app.get("/api/prompt-templates")
+def prompt_templates_api(category: str = "", enabled: Optional[bool] = None, db: Session = Depends(get_db)) -> dict:
+    return {"items": list_prompt_templates(db, category or None, enabled)}
+
+
+@app.post("/api/prompt-templates")
+def create_prompt_template_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = create_prompt_template(db, payload)
+    db.commit()
+    return serialize_prompt_template(row)
+
+
+@app.post("/api/topic-packages/{topic_package_id}/ai-jobs")
+def create_topic_ai_jobs_api(topic_package_id: str, job_type: str = "all", db: Session = Depends(get_db)) -> dict:
+    if job_type == "all":
+        rows = create_default_topic_ai_jobs(db, topic_package_id)
+    else:
+        rows = [create_ai_job(db, topic_package_id, job_type)]
+    db.commit()
+    return {"items": [serialize_ai_job(row) for row in rows]}
+
+
+@app.get("/api/topic-packages/{topic_package_id}/ai-jobs")
+def topic_ai_jobs_api(topic_package_id: str, db: Session = Depends(get_db)) -> dict:
+    return {"items": topic_ai_jobs(db, topic_package_id)}
+
+
+@app.post("/api/ai/jobs/{job_id}/run")
+def run_ai_job_api(job_id: str, db: Session = Depends(get_db)) -> dict:
+    row = run_ai_job(db, job_id)
+    db.commit()
+    return serialize_ai_job(row)
+
+
+@app.get("/api/topic-packages/{topic_package_id}/ai-analyses")
+def topic_ai_analyses_api(topic_package_id: str, db: Session = Depends(get_db)) -> dict:
+    return {"items": topic_ai_analyses(db, topic_package_id)}
+
+
+@app.post("/topic-packages/{topic_package_id}/ai-analyze-form")
+async def topic_ai_analyze_form(topic_package_id: str, db: Session = Depends(get_db)):
+    try:
+        create_default_topic_ai_jobs(db, topic_package_id)
+        db.commit()
+        return RedirectResponse(f"/topic-packages/{topic_package_id}?msg=AI任务已创建", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/topic-packages/{topic_package_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/ai/jobs/{job_id}/run-form")
+async def ai_job_run_form(job_id: str, request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    topic_package_id = form.get("topic_package_id", "")
+    try:
+        row = run_ai_job(db, job_id)
+        db.commit()
+        msg = "AI任务已完成" if row.status == "completed" else f"AI任务状态：{row.status}"
+        return RedirectResponse(f"/topic-packages/{topic_package_id}?msg={quote(msg)}", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/topic-packages/{topic_package_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.get("/gpt-director", response_class=HTMLResponse)
+def gpt_director_page(topic_package_id: str = "", msg: str = "", level: str = "ok", db: Session = Depends(get_db)) -> HTMLResponse:
+    packages = list_topic_packages(db, limit=100)["items"]
+    selected_id = topic_package_id or (packages[0]["id"] if packages else "")
+    prompt_text = generate_gpt_director_prompt(db, selected_id) if selected_id else ""
+    analyses = topic_ai_analyses(db, selected_id) if selected_id else []
+    selected = db.get(StudioTopicPackage, selected_id) if selected_id else None
+    saved_briefs = []
+    if selected_id:
+        saved_briefs = db.scalars(
+            select(StudioEditorialBrief)
+            .where(StudioEditorialBrief.topic_package_id == selected_id)
+            .order_by(StudioEditorialBrief.updated_at.desc())
+            .limit(20)
+        ).all()
+    options = "".join(
+        f'<option value="{escape(package["id"])}" {"selected" if package["id"] == selected_id else ""}>{escape(package["title"])}</option>'
+        for package in packages
+    )
+    analyses_html = "<pre>" + escape(json.dumps(analyses, ensure_ascii=False, indent=2)) + "</pre>" if analyses else '<div class="placeholder">该主题包暂无 AI 分析结果</div>'
+    briefs_html = (
+        "<table><thead><tr><th>版本</th><th>状态</th><th>创建时间</th><th>内容</th></tr></thead><tbody>"
+        + "".join(
+            "<tr>"
+            f"<td>{escape(row.version)}</td>"
+            f"<td>{escape(row.status)}</td>"
+            f"<td>{escape(row.created_at.isoformat() if row.created_at else '')}</td>"
+            f"<td><pre>{escape(row.input_json)}</pre></td>"
+            "</tr>"
+            for row in saved_briefs
+        )
+        + "</tbody></table>"
+        if saved_briefs
+        else '<div class="placeholder">暂无 Editorial Brief 草稿</div>'
+    )
+    body = f"""
+      <h1>GPT编导</h1>
+      <p class="subtitle">本页只生成可复制给 ChatGPT 的 Prompt，并保存人工粘贴回来的 Editorial Brief 草稿。</p>
+      {message_html(msg, level)}
+      <section class="panel">
+        <form method="get" action="/gpt-director" class="toolbar">
+          <label>选择主题包<br><select class="field" name="topic_package_id">{options}</select></label>
+          <button class="button secondary" type="submit">加载</button>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>主题包输入</h2>
+        <div class="detail-grid">
+          <div>标题</div><div>{escape(selected.title if selected else "")}</div>
+          <div>状态</div><div>{escape(selected.status if selected else "")}</div>
+          <div>摘要</div><div>{escape(selected.summary if selected else "")}</div>
+        </div>
+        <h3>AI分析结果</h3>
+        {analyses_html}
+      </section>
+      <section class="panel">
+        <h2>生成GPT Prompt</h2>
+        <textarea class="field" style="width: 100%; min-height: 340px;">{escape(prompt_text)}</textarea>
+      </section>
+      <section class="panel">
+        <h2>JSON接收区</h2>
+        <form method="post" action="/gpt-director/save-brief-form" class="toolbar">
+          <input type="hidden" name="topic_package_id" value="{escape(selected_id)}">
+          <input type="hidden" name="prompt_snapshot" value="{escape(prompt_text)}">
+          <label style="width:100%">Editorial Brief JSON<br><textarea class="field" style="width:100%; min-height:180px;" name="input_json">{{}}</textarea></label>
+          <button class="button" type="submit">保存草稿</button>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>已保存草稿</h2>
+        {briefs_html}
+      </section>
+    """
+    return render_shell("gpt-director", "GPT编导", body)
+
+
+@app.post("/gpt-director/save-brief-form")
+async def gpt_director_save_brief_form(request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    topic_package_id = form.get("topic_package_id", "")
+    try:
+        save_editorial_brief(
+            db,
+            topic_package_id,
+            form.get("prompt_snapshot", ""),
+            form.get("input_json", "{}"),
+        )
+        db.commit()
+        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&msg=Editorial Brief 草稿已保存", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/api/editorial-briefs")
+def create_editorial_brief_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = save_editorial_brief(
+        db,
+        str(payload.get("topic_package_id") or ""),
+        str(payload.get("prompt_snapshot") or ""),
+        str(payload.get("input_json") or "{}"),
+    )
+    db.commit()
+    return serialize_editorial_brief(row)
 
 
 def placeholder_page(page_key: str) -> HTMLResponse:

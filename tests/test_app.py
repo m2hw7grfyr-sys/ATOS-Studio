@@ -13,6 +13,7 @@ from config.settings import get_settings
 from config.settings import Settings
 from database import Base
 from models.schemas import AtosContentItem
+from services.ai.providers.llm_provider import LLMGeneration, LLMHealth
 
 
 client = TestClient(app)
@@ -386,6 +387,117 @@ class ContentPoolTests(unittest.TestCase):
         self.assertIn("主题包列表", list_page.text)
         self.assertEqual(detail_page.status_code, 200)
         self.assertIn("来源内容列表", detail_page.text)
+
+    def create_prompt(self, category="analysis"):
+        response = self.client.post(
+            "/api/prompt-templates",
+            json={
+                "name": f"{category} prompt",
+                "category": category,
+                "description": "test prompt",
+                "template": "Return JSON",
+                "variables": ["topic_title"],
+                "version": "test",
+                "enabled": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def test_ai_health_and_prompt_templates(self):
+        health = self.client.get("/api/ai/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertIn(health.json()["status"], {"available", "unavailable", "not_configured", "error"})
+
+        created = self.create_prompt("analysis")
+        listed = self.client.get("/api/prompt-templates", params={"category": "analysis"})
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(any(item["id"] == created["id"] for item in listed.json()["items"]))
+
+    def test_ai_job_success_and_editorial_brief(self):
+        item_id = self.create_pushed_item("ai-topic", "AI topic candidate", 80, 30, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "AI topic candidate", "content_item_ids": [item_id]},
+        ).json()
+        self.create_prompt("analysis")
+
+        class FakeProvider:
+            provider_name = "fake-local"
+
+            def health_check(self):
+                return LLMHealth("fake-local", "available", "fake-model")
+
+            def get_model_info(self):
+                return {"provider": "fake-local", "model": "fake-model"}
+
+            def generate(self, prompt: str):
+                return LLMGeneration(
+                    text='{"core_issue":"focus drop","main_points":["afternoon crash"],"source_summary":"summary"}',
+                    provider="fake-local",
+                    model="fake-model",
+                )
+
+        created_job = self.client.post(
+            f"/api/topic-packages/{package['id']}/ai-jobs",
+            params={"job_type": "topic_summary"},
+        )
+        self.assertEqual(created_job.status_code, 200)
+        job_id = created_job.json()["items"][0]["id"]
+        with patch("services.ai_service.get_ai_provider", return_value=FakeProvider()):
+            run = self.client.post(f"/api/ai/jobs/{job_id}/run")
+        self.assertEqual(run.status_code, 200)
+        self.assertEqual(run.json()["status"], "completed")
+
+        analyses = self.client.get(f"/api/topic-packages/{package['id']}/ai-analyses")
+        self.assertEqual(analyses.status_code, 200)
+        self.assertEqual(analyses.json()["items"][0]["analysis_type"], "summary")
+
+        page = self.client.get(f"/topic-packages/{package['id']}")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("AI Insights", page.text)
+
+        director = self.client.get("/gpt-director", params={"topic_package_id": package["id"]})
+        self.assertEqual(director.status_code, 200)
+        self.assertIn("生成GPT Prompt", director.text)
+
+        brief = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": "prompt",
+                "input_json": '{"hook":"test"}',
+            },
+        )
+        self.assertEqual(brief.status_code, 200)
+        self.assertEqual(brief.json()["status"], "draft")
+
+    def test_ai_job_failure_is_stored_without_crashing(self):
+        item_id = self.create_pushed_item("ai-fail-topic", "AI fail topic candidate")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "AI fail topic candidate", "content_item_ids": [item_id]},
+        ).json()
+        self.create_prompt("analysis")
+        job_id = self.client.post(
+            f"/api/topic-packages/{package['id']}/ai-jobs",
+            params={"job_type": "topic_summary"},
+        ).json()["items"][0]["id"]
+
+        class BrokenProvider:
+            provider_name = "broken-local"
+
+            def get_model_info(self):
+                return {"model": "broken-model"}
+
+            def generate(self, prompt: str):
+                raise RuntimeError("provider unavailable")
+
+        with patch("services.ai_service.get_ai_provider", return_value=BrokenProvider()):
+            run = self.client.post(f"/api/ai/jobs/{job_id}/run")
+        self.assertEqual(run.status_code, 200)
+        self.assertEqual(run.json()["status"], "failed")
+        self.assertIn("provider unavailable", run.json()["error_message"])
 
 
 if __name__ == "__main__":
