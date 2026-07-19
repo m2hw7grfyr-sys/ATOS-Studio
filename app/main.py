@@ -71,6 +71,13 @@ from services.generation_planner import (
     list_generation_pipelines,
     list_generation_tasks,
 )
+from services.generation_executor import (
+    create_scene_image_task,
+    list_workflows,
+    run_generation_task,
+    scene_assets,
+    task_assets,
+)
 from services.topic_intelligence_service import TOPIC_INTELLIGENCE_JOB_TYPE
 from services.topic_packages import (
     add_items_to_topic_package,
@@ -97,6 +104,7 @@ from services.video_production import (
     list_personas,
     list_social_accounts,
     list_video_projects,
+    serialize_generation_task,
     serialize_persona,
     serialize_social_account,
     serialize_video_project,
@@ -1877,6 +1885,34 @@ def generation_provider_health_api(provider_name: str) -> dict:
     return provider_health(provider_name)
 
 
+@app.get("/api/generation-workflows")
+def generation_workflows_api(provider: str = "", workflow_type: str = "", db: Session = Depends(get_db)) -> dict:
+    return {"items": list_workflows(db, provider or None, workflow_type or None)}
+
+
+@app.post("/api/scenes/{scene_id}/generate-image")
+def create_scene_image_task_api(scene_id: str, run_now: bool = True, db: Session = Depends(get_db)) -> dict:
+    task = create_scene_image_task(db, scene_id, "comfyui")
+    if run_now:
+        payload = run_generation_task(db, task.id)
+    else:
+        payload = {"task": serialize_generation_task(task), "assets": []}
+    db.commit()
+    return payload
+
+
+@app.post("/api/generation-tasks/{task_id}/run")
+def run_generation_task_api(task_id: str, db: Session = Depends(get_db)) -> dict:
+    payload = run_generation_task(db, task_id)
+    db.commit()
+    return payload
+
+
+@app.get("/api/generation-tasks/{task_id}/assets")
+def generation_task_assets_api(task_id: str, db: Session = Depends(get_db)) -> dict:
+    return {"items": task_assets(db, task_id)}
+
+
 @app.get("/accounts", response_class=HTMLResponse)
 def accounts_page(msg: str = "", level: str = "ok", db: Session = Depends(get_db)) -> HTMLResponse:
     personas = list_personas(db)
@@ -2080,20 +2116,34 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
     project = serialize_video_project(db, row, include_detail=True)
     brief = project.get("editorial_brief") or {}
     output = brief.get("output") or {}
-    scenes_rows = "".join(
-        "<tr>"
-        f'<td>{escape(str(scene["scene_number"]))}</td>'
-        f'<td>{escape(str(scene.get("duration") or ""))}</td>'
-        f'<td>{escape(scene.get("visual_prompt") or "")}</td>'
-        f'<td>{escape(scene.get("voiceover") or "")}</td>'
-        f'<td>{escape(scene.get("subtitle") or "")}</td>'
-        f'<td>{escape(scene.get("camera_direction") or "")}</td>'
-        f'<td>{escape(scene.get("status") or "")}</td>'
-        "</tr>"
-        for scene in project.get("scenes") or []
-    )
+    scenes_rows = ""
+    for scene in project.get("scenes") or []:
+        assets = scene_assets(db, scene["id"])
+        latest_asset = assets[0] if assets else None
+        preview = (
+            f'<img src="{escape(latest_asset.get("url") or latest_asset.get("file_path") or "")}" alt="Scene image" style="max-width:180px;border-radius:6px;border:1px solid var(--line);">'
+            if latest_asset and (latest_asset.get("url") or latest_asset.get("file_path"))
+            else '<span class="status-warn">暂无图片</span>'
+        )
+        scene_tasks = [task for task in project.get("generation_tasks") or [] if task.get("scene_id") == scene["id"] and task.get("task_type") == "image_generation"]
+        latest_task = scene_tasks[0] if scene_tasks else {}
+        scenes_rows += (
+            "<tr>"
+            f'<td>{escape(str(scene["scene_number"]))}</td>'
+            f'<td>{escape(str(scene.get("duration") or ""))}</td>'
+            f'<td>{escape(scene.get("visual_prompt") or "")}</td>'
+            f'<td>{escape(scene.get("voiceover") or "")}</td>'
+            f'<td>{escape(scene.get("subtitle") or "")}</td>'
+            f'<td>{escape(scene.get("camera_direction") or "")}</td>'
+            f'<td>{escape(latest_task.get("status") or scene.get("status") or "等待")}</td>'
+            f'<td>{preview}</td>'
+            '<td><div class="actions">'
+            f'<form method="post" action="/scenes/{escape(scene["id"])}/generate-image-form"><input type="hidden" name="project_id" value="{escape(project["id"])}"><button class="button" type="submit">生成画面</button></form>'
+            "</div></td>"
+            "</tr>"
+        )
     scenes_html = (
-        "<table><thead><tr><th>#</th><th>时长</th><th>画面Prompt</th><th>Voiceover</th><th>Subtitle</th><th>镜头</th><th>状态</th></tr></thead><tbody>"
+        "<table><thead><tr><th>#</th><th>时长</th><th>画面Prompt</th><th>Voiceover</th><th>Subtitle</th><th>镜头</th><th>图片状态</th><th>预览</th><th>操作</th></tr></thead><tbody>"
         + scenes_rows
         + "</tbody></table>"
     )
@@ -2187,6 +2237,25 @@ async def video_project_generation_plan_form(project_id: str, db: Session = Depe
         return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
 
 
+@app.post("/scenes/{scene_id}/generate-image-form")
+async def scene_generate_image_form(scene_id: str, request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    project_id = form.get("project_id", "")
+    try:
+        task = create_scene_image_task(db, scene_id, "comfyui")
+        payload = run_generation_task(db, task.id)
+        db.commit()
+        status_label = payload["task"]["status"]
+        level = "ok" if status_label in {"completed", "running"} else "warn"
+        return RedirectResponse(
+            f"/video-projects/{project_id}?level={level}&msg=图片生成任务状态：{quote(status_label)}",
+            status_code=303,
+        )
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
 def placeholder_page(page_key: str) -> HTMLResponse:
     label = PLACEHOLDER_PAGES[page_key]
     body = f"""
@@ -2213,19 +2282,23 @@ def generation_queue(
     rows = []
     for task in tasks:
         project = db.get(StudioVideoProject, task["video_project_id"])
+        assets = task_assets(db, task["id"])
+        asset_status = f'{len(assets)} asset' if len(assets) == 1 else f'{len(assets)} assets'
         rows.append(
             "<tr>"
             f'<td>{escape(task["id"])}</td>'
             f'<td>{escape(project.title if project else task["video_project_id"])}</td>'
             f'<td>{escape(task["task_type"])}</td>'
             f'<td>{escape(task.get("provider_name") or task.get("provider") or "")}</td>'
+            f'<td>{escape(task.get("provider_task_id") or "")}</td>'
             f'<td>{escape(task["status"])}</td>'
+            f'<td>{escape(asset_status)}</td>'
             f'<td>{escape(task.get("created_at") or "")}</td>'
             f'<td>{escape(task.get("updated_at") or "")}</td>'
             "</tr>"
         )
     table = (
-        "<table><thead><tr><th>Task ID</th><th>项目</th><th>类型</th><th>Provider</th><th>状态</th><th>创建时间</th><th>更新时间</th></tr></thead><tbody>"
+        "<table><thead><tr><th>Task ID</th><th>项目</th><th>类型</th><th>Provider</th><th>Provider Task ID</th><th>状态</th><th>Asset状态</th><th>创建时间</th><th>更新时间</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
         if tasks

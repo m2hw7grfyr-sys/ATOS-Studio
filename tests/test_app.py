@@ -14,7 +14,10 @@ from config.settings import get_settings
 from config.settings import Settings
 from database import Base
 from models.schemas import AtosContentItem
+from models.production import StudioGenerationWorkflow
+from repositories.content_items import stable_json
 from services.ai.providers.llm_provider import LLMGeneration, LLMHealth
+from services.generation.providers.comfyui.provider import ComfyUIProvider
 from services.topic_intelligence_service import (
     TOPIC_INTELLIGENCE_JOB_TYPE,
     build_topic_intelligence_context,
@@ -87,6 +90,17 @@ class StudioAppTests(unittest.TestCase):
         self.assertIn("Default Creator", content)
         self.assertIn("general content creator", content)
         self.assertIn("studio_generation_pipelines", content)
+
+    def test_comfyui_migration_and_env_example_exist(self):
+        with open("migrations/versions/0010_add_comfyui_image_generation.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        with open(".env.example", "r", encoding="utf-8") as f:
+            env_content = f.read()
+        self.assertIn("studio_generation_workflows", content)
+        self.assertIn("studio_assets", content)
+        self.assertIn("basic_image_generation", content)
+        self.assertIn("COMFYUI_ENABLED=false", env_content)
+        self.assertIn("COMFYUI_URL=http://127.0.0.1:8188", env_content)
 
 
 class ContentPoolTests(unittest.TestCase):
@@ -980,6 +994,89 @@ class ContentPoolTests(unittest.TestCase):
         self.assertEqual(health.json()["status"], "not_configured")
         missing = self.client.get("/api/generation/providers/unknown/health")
         self.assertEqual(missing.status_code, 404)
+
+    def test_comfyui_image_generation_task_asset_and_page(self):
+        item_id = self.create_pushed_item("comfyui-1", "A quiet desk scene for ADHD planning", 88, 14, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "Quiet planning scene", "content_item_ids": [item_id]},
+        ).json()
+        self.create_topic_intelligence_analysis(package["id"])
+        self.create_prompt("editorial")
+        prompt = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        brief = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": self.valid_editorial_output("Quiet Planning Scene"),
+            },
+        ).json()
+        project = self.client.post(
+            "/api/video-projects/from-brief",
+            json={"editorial_brief_id": brief["id"], "creation_mode": "general"},
+        ).json()
+        scene_id = project["scenes"][0]["id"]
+        with self.Session() as db:
+            db.add(
+                StudioGenerationWorkflow(
+                    id="workflow-test-comfyui",
+                    name="basic_image_generation",
+                    provider="comfyui",
+                    workflow_type="image_generation",
+                    workflow_json=stable_json({"prompt": {"1": {"inputs": {"text": "{{visual_prompt}}"}}}}),
+                    version="test",
+                    enabled=True,
+                )
+            )
+            db.commit()
+
+        class FakeComfyUI:
+            def submit_job(self, workflow, context):
+                assert "visual_prompt" in context
+                return {"provider_task_id": "prompt-123", "raw_response": {"prompt_id": "prompt-123"}}
+
+            def get_status(self, provider_task_id):
+                return {"provider_task_id": provider_task_id, "status": "completed"}
+
+            def get_result(self, provider_task_id):
+                return {
+                    "provider_task_id": provider_task_id,
+                    "status": "completed",
+                    "assets": [
+                        {
+                            "asset_type": "image",
+                            "file_path": "",
+                            "url": "http://127.0.0.1:8188/view?filename=test.png",
+                            "metadata": {"filename": "test.png"},
+                        }
+                    ],
+                }
+
+        with patch("services.generation_executor.get_generation_provider", return_value=FakeComfyUI()):
+            response = self.client.post(f"/api/scenes/{scene_id}/generate-image")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["task"]["status"], "completed")
+        self.assertEqual(payload["task"]["provider_task_id"], "prompt-123")
+        self.assertEqual(payload["assets"][0]["asset_type"], "image")
+
+        assets = self.client.get(f"/api/generation-tasks/{payload['task']['id']}/assets")
+        self.assertEqual(assets.status_code, 200)
+        self.assertEqual(len(assets.json()["items"]), 1)
+        queue_page = self.client.get("/generation-queue", params={"task_type": "image_generation"})
+        detail_page = self.client.get(f"/video-projects/{project['id']}")
+        self.assertIn("prompt-123", queue_page.text)
+        self.assertIn("1 asset", queue_page.text)
+        self.assertIn("生成画面", detail_page.text)
+        self.assertIn("test.png", detail_page.text)
+
+    def test_comfyui_health_disabled_and_unavailable(self):
+        disabled = ComfyUIProvider(enabled=False).health_check()
+        self.assertEqual(disabled["status"], "disabled")
+        unavailable = ComfyUIProvider(base_url="http://127.0.0.1:1", timeout_seconds=0.01, enabled=True).health_check()
+        self.assertEqual(unavailable["status"], "unavailable")
 
 
 if __name__ == "__main__":

@@ -554,6 +554,83 @@ Sprint 09 的目标是建立生产队列和 Provider Adapter 架构。
 - 自动生成图片或视频
 - 自动发布
 
+## 10. 图片生成流程
+
+### 什么是Generation Task
+
+Generation Task 是一次生成动作。
+
+例如：
+
+- 某个 Scene 的图片生成
+- 某个 Scene 的视频生成
+- 整条视频的配音
+- 字幕
+- 合成
+
+当前可执行的是：
+
+`image_generation`
+
+也就是 Scene 图片生成。
+
+### 什么是Provider
+
+Provider 是实际执行生成的工具。
+
+当前已接入：
+
+`ComfyUI`
+
+未接入：
+
+- Wan
+- FLUX
+- CogVideoX
+- TTS
+- FFmpeg
+- Kling
+- Runway
+- Veo
+
+如果 ComfyUI 没有开启，系统仍然可以打开，只是图片生成任务会失败并显示错误。
+
+### 如何生成Scene图片
+
+1. 打开 `视频项目`。
+2. 进入某个视频项目详情。
+3. 找到 `Scenes`。
+4. 在某个 Scene 右侧点击 `生成画面`。
+5. 系统会创建一条 `image_generation` 任务。
+6. 如果 ComfyUI 可用，任务会提交到 ComfyUI。
+7. 生成完成后，图片会作为 Asset 保存并显示在 Scene 预览中。
+
+### 如何查看结果
+
+可以在两个地方查看：
+
+- `视频项目详情`：查看 Scene 图片预览。
+- `生成队列`：查看 Task 状态、Provider Task ID 和 Asset 数量。
+
+### 失败如何处理
+
+常见失败原因：
+
+- ComfyUI 没有启动。
+- `COMFYUI_ENABLED=false`。
+- `COMFYUI_URL` 不正确。
+- Workflow JSON 不是可执行的 ComfyUI API workflow。
+- ComfyUI 生成中断或超时。
+
+处理方式：
+
+1. 检查 ComfyUI 是否能打开。
+2. 检查 Studio 的 ComfyUI 配置。
+3. 检查 `生成队列` 中的错误状态。
+4. 修正后重新点击 `生成画面`。
+
+当前版本不会自动重试，也不会自动执行视频生成。
+
 ### 选择Persona
 
 Persona 会影响 GPT Prompt。
@@ -592,9 +669,9 @@ Persona 会影响 GPT Prompt。
 - 配音
 - 合成
 
-Sprint 09 不会真正连接视频模型。
+Sprint 10 只连接 ComfyUI 图片生成。视频生成、配音、字幕、合成仍未实现。
 
-## 10. 常见问题
+## 11. 常见问题
 
 ### AI任务失败
 

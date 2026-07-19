@@ -116,3 +116,30 @@ class StudioGenerationPipeline(Base):
     completed_tasks: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class StudioGenerationWorkflow(Base):
+    __tablename__ = "studio_generation_workflows"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    provider: Mapped[str] = mapped_column(String(120), index=True)
+    workflow_type: Mapped[str] = mapped_column(String(80), index=True)
+    workflow_json: Mapped[str] = mapped_column(Text, default="{}")
+    version: Mapped[str] = mapped_column(String(80), default="v1", index=True)
+    enabled: Mapped[bool] = mapped_column(default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class StudioAsset(Base):
+    __tablename__ = "studio_assets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    asset_type: Mapped[str] = mapped_column(String(40), index=True)
+    file_path: Mapped[str] = mapped_column(String(1000), default="")
+    url: Mapped[str] = mapped_column(String(1000), default="")
+    provider: Mapped[str] = mapped_column(String(120), index=True)
+    generation_task_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_tasks.id"), index=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

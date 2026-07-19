@@ -500,6 +500,52 @@ http://127.0.0.1:8502/generation-queue
 
 Provider adapters live under `services/generation/providers/`. Sprint 09 only registers placeholder adapters and health checks.
 
+## ComfyUI Image Generation
+
+Sprint 10 adds the first real generation adapter: ComfyUI image generation.
+
+Environment:
+
+```bash
+COMFYUI_ENABLED=false
+COMFYUI_URL=http://127.0.0.1:8188
+COMFYUI_TIMEOUT_SECONDS=120
+```
+
+`COMFYUI_ENABLED=false` is the default. Studio starts normally when ComfyUI is disabled or unavailable.
+
+Health:
+
+```bash
+curl http://127.0.0.1:8502/api/generation/providers/comfyui/health
+```
+
+Workflow:
+
+```bash
+curl "http://127.0.0.1:8502/api/generation-workflows?provider=comfyui&workflow_type=image_generation"
+```
+
+Generate an image for a scene:
+
+```bash
+curl -X POST "http://127.0.0.1:8502/api/scenes/{scene_id}/generate-image?run_now=true"
+```
+
+Run an existing image task:
+
+```bash
+curl -X POST http://127.0.0.1:8502/api/generation-tasks/{task_id}/run
+```
+
+All generated results are saved as Studio Assets in `studio_assets`. The Video Project page shows scene image status and preview. The Generation Queue shows Provider Task ID and Asset status.
+
+Current limits:
+
+- Only `image_generation` is executable.
+- Video generation, TTS, subtitles, FFmpeg, publishing, Kling, Runway, and Veo are not implemented.
+- The default workflow is a placeholder. Replace `studio_generation_workflows.workflow_json` with a real ComfyUI API workflow before production use.
+
 ## Idempotency
 
 Duplicate imports do not create another row. Priority:

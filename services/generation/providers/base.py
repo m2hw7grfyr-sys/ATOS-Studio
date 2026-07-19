@@ -10,6 +10,9 @@ class GenerationProvider:
     def generate(self, task: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError("generation provider is not configured")
 
+    def submit_job(self, workflow: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError("generation provider is not configured")
+
     def health_check(self) -> dict[str, Any]:
         return {
             "provider": self.provider_name,
@@ -24,6 +27,14 @@ class GenerationProvider:
             "provider": self.provider_name,
             "provider_task_id": provider_task_id,
             "status": "unknown",
+        }
+
+    def get_result(self, provider_task_id: Optional[str]) -> dict[str, Any]:
+        return {
+            "provider": self.provider_name,
+            "provider_task_id": provider_task_id,
+            "status": "unknown",
+            "assets": [],
         }
 
     def cancel(self, provider_task_id: Optional[str]) -> dict[str, Any]:
