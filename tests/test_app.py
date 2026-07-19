@@ -75,6 +75,13 @@ class StudioAppTests(unittest.TestCase):
         self.assertIn(".env", content)
         self.assertFalse(os.path.exists(".env"))
 
+    def test_brainy_default_account_migration_exists(self):
+        with open("migrations/versions/0008_seed_brainy_default_account.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Brainy（小脑瓜）", content)
+        self.assertIn("TiredBrainClub", content)
+        self.assertIn("medical claims", content)
+
 
 class ContentPoolTests(unittest.TestCase):
     def setUp(self):

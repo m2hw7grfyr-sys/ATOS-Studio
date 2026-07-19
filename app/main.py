@@ -1884,13 +1884,13 @@ def accounts_page(msg: str = "", level: str = "ok", db: Session = Depends(get_db
       <section class="panel">
         <h2>创建 Persona</h2>
         <form method="post" action="/accounts/persona-create-form" class="toolbar">
-          <label>名称<br><input class="field" name="name" placeholder="Sarah ADHD Student" required></label>
-          <label>描述<br><input class="field" name="description" placeholder="College student persona"></label>
-          <label>目标用户<br><input class="field" name="target_audience" placeholder="ADHD college students"></label>
-          <label>语气<br><input class="field" name="tone_style" placeholder="casual"></label>
-          <label>语言风格<br><input class="field" name="language_style" placeholder="american english"></label>
-          <label>视觉风格<br><input class="field" name="visual_style" placeholder="personal storytelling"></label>
-          <label>Persona Profile JSON<br><textarea class="field" name="persona_profile_json">{{"identity":"college student","avoid":["medical claims"]}}</textarea></label>
+          <label>名称<br><input class="field" name="name" placeholder="Brainy（小脑瓜）" required></label>
+          <label>描述<br><input class="field" name="description" placeholder="深夜想法的陪伴者 / 你的精神内耗代言人"></label>
+          <label>目标用户<br><input class="field" name="target_audience" placeholder="ADHD、焦虑、拖延、高敏感、深夜EMO"></label>
+          <label>语气<br><input class="field" name="tone_style" placeholder="敏感、疲惫、温柔、共情"></label>
+          <label>语言风格<br><input class="field" name="language_style" placeholder="短句、低能量、像深夜朋友聊天"></label>
+          <label>视觉风格<br><input class="field" name="visual_style" placeholder="灰黑 hoodie、黑眼圈、低饱和灰米色"></label>
+          <label>Persona Profile JSON<br><textarea class="field" name="persona_profile_json">{{"identity":"college student / exhausted overthinker","avoid":["medical claims"]}}</textarea></label>
           <button class="button" type="submit">创建</button>
         </form>
       </section>
@@ -1902,8 +1902,8 @@ def accounts_page(msg: str = "", level: str = "ok", db: Session = Depends(get_db
         <h2>添加 Social Account</h2>
         <form method="post" action="/accounts/social-create-form" class="toolbar">
           <label>平台<br><input class="field" name="platform" placeholder="tiktok" required></label>
-          <label>用户名<br><input class="field" name="username" placeholder="sarahfocus" required></label>
-          <label>显示名<br><input class="field" name="display_name" placeholder="Sarah ADHD"></label>
+          <label>用户名<br><input class="field" name="username" placeholder="TiredBrainClub" required></label>
+          <label>显示名<br><input class="field" name="display_name" placeholder="Brainy 小脑瓜"></label>
           <label>绑定Persona<br><select class="field" name="persona_id">{persona_options}</select></label>
           <label>状态<br><select class="field" name="status"><option value="testing">testing</option><option value="active">active</option><option value="inactive">inactive</option></select></label>
           <button class="button" type="submit">添加账号</button>

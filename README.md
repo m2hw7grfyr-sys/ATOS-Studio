@@ -428,6 +428,12 @@ Social accounts bind a real publishing account to one Persona:
 - status
 - publishing_rules JSON
 
+The default seeded persona/account is:
+
+- Persona: `Brainy（小脑瓜）`
+- Account: TikTok `@TiredBrainClub`
+- Positioning: late-night ADHD, overthinking, anxiety, procrastination, high-sensitivity, and soft self-acceptance content.
+
 Generate an Editorial Prompt for a specific Persona:
 
 ```bash
