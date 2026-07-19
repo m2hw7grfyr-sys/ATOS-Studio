@@ -59,6 +59,11 @@ def serialize_item(item: StudioContentItem) -> StudioContentItemRead:
         requested_content_type=item.requested_content_type,
         target_platforms=parse_json(item.target_platforms_json, []),
         operator_note=item.operator_note,
+        review_note=item.review_note,
+        reviewed_at=item.reviewed_at,
+        approved_at=item.approved_at,
+        rejected_at=item.rejected_at,
+        archived_at=item.archived_at,
         last_pushed_at=item.last_pushed_at,
         push_count=item.push_count or 0,
         imported_at=item.imported_at,
@@ -190,12 +195,28 @@ class ContentItemRepository:
             return None
         return self.db.scalar(select(StudioContentItem).where(or_(*conditions)).limit(1))
 
-    def list(self, status: Optional[str], platform: Optional[str], search: Optional[str], limit: int, offset: int) -> tuple[list[StudioContentItem], int]:
+    def list(
+        self,
+        status: Optional[str],
+        platform: Optional[str],
+        search: Optional[str],
+        limit: int,
+        offset: int,
+        source_type: Optional[str] = None,
+        risk_level: Optional[str] = None,
+        target_content_type: Optional[str] = None,
+    ) -> tuple[list[StudioContentItem], int]:
         statement = select(StudioContentItem)
         if status:
             statement = statement.where(StudioContentItem.status == status)
         if platform:
             statement = statement.where(StudioContentItem.source_platform == platform.lower())
+        if source_type:
+            statement = statement.where(StudioContentItem.source_type == source_type)
+        if risk_level:
+            statement = statement.where(StudioContentItem.risk_level == risk_level)
+        if target_content_type:
+            statement = statement.where(StudioContentItem.requested_content_type == target_content_type)
         if search:
             pattern = f"%{search}%"
             statement = statement.where(

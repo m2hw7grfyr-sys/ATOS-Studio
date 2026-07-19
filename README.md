@@ -12,6 +12,12 @@ Sprint 03 adds active ATOS push:
 ATOS Post Pool -> ATOS backend proxy -> Studio push API -> studio_content_items -> ATOS status feedback
 ```
 
+Sprint 04 adds manual review and topic packages:
+
+```text
+studio_content_items -> manual review -> studio_topic_packages -> package approval
+```
+
 Video generation, ComfyUI, Wan, TTS, subtitles, FFmpeg, cloud backup, automatic ingestion, clustering, and shared user login are not implemented.
 
 ## Environment
@@ -117,7 +123,40 @@ Update status:
 ```bash
 curl -X PATCH http://127.0.0.1:8502/api/content-items/{studio_item_id}/status \
   -H "Content-Type: application/json" \
-  -d '{"status":"approved"}'
+  -d '{"status":"approved","review_note":"ready for short video"}'
+```
+
+Batch status update:
+
+```bash
+curl -X POST http://127.0.0.1:8502/api/content-items/status-batch \
+  -H "Content-Type: application/json" \
+  -d '{"content_item_ids":["uuid-1","uuid-2"],"status":"approved","review_note":"适合后续做短视频"}'
+```
+
+Create a topic package from content items:
+
+```bash
+curl -X POST http://127.0.0.1:8502/api/topic-packages/from-content-items \
+  -H "Content-Type: application/json" \
+  -d '{"title":"ADHD medication wears off too early","content_item_ids":["uuid-1","uuid-2"],"content_angle":"解释型","target_content_type":"video","target_platforms":["tiktok","youtube_shorts"]}'
+```
+
+Topic package APIs:
+
+```text
+GET    /api/topic-packages
+GET    /api/topic-packages/{topic_package_id}
+POST   /api/topic-packages
+PATCH  /api/topic-packages/{topic_package_id}
+PATCH  /api/topic-packages/{topic_package_id}/status
+DELETE /api/topic-packages/{topic_package_id}
+POST   /api/topic-packages/{topic_package_id}/items
+DELETE /api/topic-packages/{topic_package_id}/items/{content_item_id}
+PATCH  /api/topic-packages/{topic_package_id}/primary-item
+PATCH  /api/topic-packages/{topic_package_id}/items/order
+GET    /api/topic-packages/similar?title=...
+POST   /api/topic-packages/merge
 ```
 
 Allowed statuses:
@@ -136,7 +175,53 @@ The content pool page includes:
 - List with title, platform, author, score, comments, risk level, status, imported time
 - Detail page with source snapshot
 - Source type, requested content type, target platforms, push count, and last pushed time
-- Actions: view, approve, reject, archive
+- Actions: view, approve, reject, archive, create topic package
+- Batch actions: approve, reject, archive, restore to pending review, create topic package
+
+## Topic Packages
+
+A topic package is a manually curated group of source content around one pain point, question, or content angle. It is not a video project and does not trigger generation.
+
+Current states:
+
+- `pending_review`
+- `approved`
+- `rejected`
+- `archived`
+
+Member rules:
+
+- One content item cannot appear twice in the same package.
+- One content item may belong to multiple packages.
+- Removing a member sets `removed_at`; it does not delete the content item.
+- If the removed member was primary, the service selects the next active source as primary when available.
+- Ordering is stored in `position`.
+
+Statistics are recalculated by the service after membership changes:
+
+- `source_count`
+- `total_comment_count`
+- `average_source_score`
+- `max_source_score`
+- `risk_level`
+
+Risk aggregation:
+
+- Any source `high` -> package `high`
+- Else any source `medium` -> package `medium`
+- Else all active sources `low` -> package `low`
+- Else `unknown`
+
+Similarity hints use normalized title and token overlap only. They are marked as possible duplicates and never block creation.
+
+Audit events are recorded for review changes, package creation, updates, status changes, member add/remove, primary source changes, sorting, and merge.
+
+Open pages:
+
+```text
+http://127.0.0.1:8502/content-pool
+http://127.0.0.1:8502/topic-packages
+```
 
 ## Idempotency
 

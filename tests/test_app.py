@@ -156,20 +156,20 @@ class ContentPoolTests(unittest.TestCase):
         self.assertIn("原始source snapshot", page.text)
         self.assertIn("Studio candidate", page.text)
 
-    def push_payload(self):
+    def push_payload(self, source_post_id="abc123", title="Studio push candidate", score=88, comments=42, risk="low"):
         return {
             "source_platform": "reddit",
-            "atos_post_id": "1",
-            "source_post_id": "abc123",
-            "source_url": "https://example.com/abc123",
-            "title": "Studio push candidate",
+            "atos_post_id": source_post_id,
+            "source_post_id": source_post_id,
+            "source_url": f"https://example.com/{source_post_id}",
+            "title": title,
             "body": "Useful pushed text",
             "author": "author-a",
             "published_at": datetime.now(timezone.utc).isoformat(),
             "collected_at": datetime.now(timezone.utc).isoformat(),
-            "source_score": 88,
-            "comment_count": 42,
-            "risk_level": "low",
+            "source_score": score,
+            "comment_count": comments,
+            "risk_level": risk,
             "tags": ["studio"],
             "metadata": {"community": "demo"},
             "push_context": {
@@ -242,6 +242,150 @@ class ContentPoolTests(unittest.TestCase):
             json={"source_platform": "reddit", "title": ""},
         )
         self.assertEqual(response.status_code, 422)
+
+    def create_pushed_item(self, suffix: str, title: str, score: int = 50, comments: int = 5, risk: str = "low"):
+        headers = {"Authorization": "Bearer studio-push-test-token"}
+        response = self.client.post(
+            "/api/content-items/push",
+            headers=headers,
+            json=self.push_payload(source_post_id=suffix, title=title, score=score, comments=comments, risk=risk),
+        )
+        self.assertIn(response.status_code, {200, 201})
+        return response.json()["studio_item_id"]
+
+    def test_content_status_batch_partial_failure_and_review_timestamps(self):
+        first_id = self.create_pushed_item("batch-1", "Batch item one")
+        second_id = self.create_pushed_item("batch-2", "Batch item two")
+        response = self.client.post(
+            "/api/content-items/status-batch",
+            json={
+                "content_item_ids": [first_id, second_id, "missing-id", first_id],
+                "status": "approved",
+                "review_note": "适合后续做短视频",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["total"], 3)
+        self.assertEqual(payload["updated"], 2)
+        self.assertEqual(payload["failed"], 1)
+
+        item = self.client.get(f"/api/content-items/{first_id}").json()
+        self.assertEqual(item["status"], "approved")
+        self.assertEqual(item["review_note"], "适合后续做短视频")
+        self.assertIsNotNone(item["approved_at"])
+
+        invalid = self.client.post(
+            "/api/content-items/status-batch",
+            json={"content_item_ids": [first_id], "status": "drafting"},
+        )
+        self.assertEqual(invalid.status_code, 422)
+
+    def test_topic_package_full_manual_workflow(self):
+        first_id = self.create_pushed_item("topic-1", "ADHD medication wears off too early", 90, 40, "low")
+        second_id = self.create_pushed_item("topic-2", "Medication wears off early at work", 70, 20, "medium")
+        third_id = self.create_pushed_item("topic-3", "How to handle ADHD medication crash", 50, 10, "high")
+
+        self.client.post(
+            "/api/content-items/status-batch",
+            json={"content_item_ids": [first_id, second_id, third_id], "status": "approved"},
+        )
+        created = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={
+                "title": "ADHD medication wears off too early",
+                "content_item_ids": [first_id, second_id, second_id, third_id],
+                "content_angle": "解释型",
+                "target_content_type": "video",
+                "target_platforms": ["tiktok", "youtube_shorts"],
+                "primary_content_item_id": first_id,
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+        package = created.json()
+        package_id = package["id"]
+        self.assertEqual(package["source_count"], 3)
+        self.assertEqual(package["total_comment_count"], 70)
+        self.assertEqual(package["max_source_score"], 90)
+        self.assertEqual(package["risk_level"], "high")
+        self.assertEqual(sum(1 for item in package["items"] if item["is_primary"]), 1)
+
+        duplicate = self.client.post(
+            f"/api/topic-packages/{package_id}/items",
+            json={"content_item_ids": [second_id]},
+        )
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertEqual(duplicate.json()["results"][0]["status"], "duplicate")
+
+        removed = self.client.delete(f"/api/topic-packages/{package_id}/items/{second_id}")
+        self.assertEqual(removed.status_code, 200)
+        self.assertEqual(removed.json()["source_count"], 2)
+        restored = self.client.post(
+            f"/api/topic-packages/{package_id}/items",
+            json={"content_item_ids": [second_id]},
+        )
+        self.assertEqual(restored.json()["results"][0]["status"], "restored")
+
+        primary = self.client.patch(
+            f"/api/topic-packages/{package_id}/primary-item",
+            json={"content_item_id": third_id},
+        )
+        self.assertEqual(primary.status_code, 200)
+        self.assertEqual(sum(1 for item in primary.json()["items"] if item["is_primary"]), 1)
+
+        ordered_ids = [third_id, first_id, second_id]
+        reordered = self.client.patch(
+            f"/api/topic-packages/{package_id}/items/order",
+            json={"ordered_content_item_ids": ordered_ids},
+        )
+        self.assertEqual(reordered.status_code, 200)
+        self.assertEqual([item["content_item_id"] for item in reordered.json()["items"]], ordered_ids)
+
+        approved = self.client.patch(f"/api/topic-packages/{package_id}/status", json={"status": "approved"})
+        self.assertEqual(approved.json()["status"], "approved")
+
+        fourth_id = self.create_pushed_item("topic-4", "ADHD medication wears off too early again", 66, 8, "low")
+        similar_package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={
+                "title": "ADHD medication wears off too early",
+                "content_item_ids": [fourth_id],
+                "target_platforms": ["tiktok"],
+            },
+        ).json()
+        similar = self.client.get("/api/topic-packages/similar", params={"title": "ADHD medication wears off too early"})
+        self.assertGreaterEqual(len(similar.json()["items"]), 1)
+
+        merged = self.client.post(
+            "/api/topic-packages/merge",
+            json={
+                "target_topic_package_id": package_id,
+                "source_topic_package_ids": [similar_package["id"]],
+                "archive_sources": True,
+            },
+        )
+        self.assertEqual(merged.status_code, 200)
+        source_after = self.client.get(f"/api/topic-packages/{similar_package['id']}").json()
+        target_after = self.client.get(f"/api/topic-packages/{package_id}").json()
+        self.assertEqual(source_after["status"], "archived")
+        self.assertEqual(target_after["source_count"], 4)
+
+        audit = self.client.get(f"/api/topic-packages/{package_id}/audit")
+        self.assertEqual(audit.status_code, 200)
+        self.assertTrue(any(item["action"] == "topic_package_merged" for item in audit.json()["items"]))
+
+    def test_topic_package_pages_load(self):
+        item_id = self.create_pushed_item("page-topic", "Page topic candidate")
+        created = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "Page topic candidate", "content_item_ids": [item_id]},
+        ).json()
+        list_page = self.client.get("/topic-packages")
+        detail_page = self.client.get(f"/topic-packages/{created['id']}")
+        self.assertEqual(list_page.status_code, 200)
+        self.assertIn("主题包列表", list_page.text)
+        self.assertEqual(detail_page.status_code, 200)
+        self.assertIn("来源内容列表", detail_page.text)
 
 
 if __name__ == "__main__":

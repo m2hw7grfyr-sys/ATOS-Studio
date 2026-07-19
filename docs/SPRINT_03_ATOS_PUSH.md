@@ -151,3 +151,25 @@ Covered:
 - FFmpeg
 - Cloud backup
 - Formal user login
+
+## Sprint 04 Compatibility Note
+
+Sprint 04 keeps the Sprint 03 push contract unchanged.
+
+ATOS can continue to push content items with:
+
+```text
+POST /api/content-items/push
+```
+
+The pushed content enters `studio_content_items` first. Topic packages are Studio-owned and are created later by an operator from the Studio content pool.
+
+Sprint 04 adds review timestamps to `studio_content_items`:
+
+- `reviewed_at`
+- `approved_at`
+- `rejected_at`
+- `archived_at`
+- `review_note`
+
+Repeated ATOS pushes still do not reset existing review state.

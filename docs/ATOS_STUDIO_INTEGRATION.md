@@ -202,6 +202,64 @@ Pushed items use `source_type=atos_manual_push`. Repeated pushes are idempotent 
 
 Allowed statuses: `pending_review`, `approved`, `rejected`, `archived`.
 
+### Batch Review
+
+Sprint 04 adds a batch status endpoint for Studio-owned content review:
+
+`POST /api/content-items/status-batch`
+
+Request:
+
+```json
+{
+  "content_item_ids": ["uuid-1", "uuid-2"],
+  "status": "approved",
+  "review_note": "适合后续做短视频"
+}
+```
+
+The endpoint accepts at most 100 IDs, deduplicates IDs inside the request, reports missing items per row, and does not fail the entire batch when one item is missing. Status changes record review timestamps and audit events.
+
+## Studio Topic Package API
+
+Sprint 04 adds topic packages as a Studio-only entity. ATOS does not manage topic packages.
+
+Primary routes:
+
+```text
+GET    /api/topic-packages
+GET    /api/topic-packages/{topic_package_id}
+POST   /api/topic-packages
+PATCH  /api/topic-packages/{topic_package_id}
+PATCH  /api/topic-packages/{topic_package_id}/status
+DELETE /api/topic-packages/{topic_package_id}
+POST   /api/topic-packages/from-content-items
+POST   /api/topic-packages/{topic_package_id}/items
+DELETE /api/topic-packages/{topic_package_id}/items/{content_item_id}
+PATCH  /api/topic-packages/{topic_package_id}/primary-item
+PATCH  /api/topic-packages/{topic_package_id}/items/order
+GET    /api/topic-packages/similar?title=...
+POST   /api/topic-packages/merge
+```
+
+Create from content items:
+
+```json
+{
+  "title": "ADHD medication wears off too early",
+  "content_item_ids": ["uuid-1", "uuid-2"],
+  "summary": "",
+  "content_angle": "解释型",
+  "target_content_type": "video",
+  "target_platforms": ["tiktok", "youtube_shorts"],
+  "operator_note": ""
+}
+```
+
+Topic package states are `pending_review`, `approved`, `rejected`, and `archived`.
+
+Similarity hints are local only: normalized title plus keyword overlap. Sprint 04 does not use OpenAI, embeddings, or vector databases.
+
 ## Idempotency
 
 Preferred idempotency key:

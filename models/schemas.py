@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field
 
 
 VALID_CONTENT_STATUSES = {"pending_review", "approved", "rejected", "archived"}
+VALID_TOPIC_PACKAGE_STATUSES = {"pending_review", "approved", "rejected", "archived"}
+VALID_TOPIC_PRIORITIES = {"low", "normal", "high", "urgent"}
+VALID_RISK_LEVELS = {"low", "medium", "high", "unknown"}
 
 
 class AtosContentItem(BaseModel):
@@ -143,6 +146,11 @@ class StudioContentItemRead(BaseModel):
     requested_content_type: Optional[str] = None
     target_platforms: list[str] = Field(default_factory=list)
     operator_note: Optional[str] = None
+    review_note: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    rejected_at: Optional[datetime] = None
+    archived_at: Optional[datetime] = None
     last_pushed_at: Optional[datetime] = None
     push_count: int = 0
     imported_at: datetime
@@ -165,3 +173,58 @@ class ImportContentItemResponse(BaseModel):
 
 class UpdateContentStatusRequest(BaseModel):
     status: str
+    review_note: str = Field(default="", max_length=2000)
+
+
+class ContentItemStatusBatchRequest(BaseModel):
+    content_item_ids: list[str] = Field(min_length=1, max_length=100)
+    status: str
+    review_note: str = Field(default="", max_length=2000)
+
+
+class TopicPackageCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    summary: str = Field(default="", max_length=5000)
+    content_angle: Optional[str] = Field(default=None, max_length=200)
+    priority: str = "normal"
+    target_content_type: Optional[str] = Field(default=None, max_length=60)
+    target_platforms: list[str] = Field(default_factory=list, max_length=20)
+    operator_note: Optional[str] = Field(default=None, max_length=2000)
+    created_by: Optional[str] = Field(default="operator", max_length=120)
+
+
+class TopicPackageUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    summary: Optional[str] = Field(default=None, max_length=5000)
+    content_angle: Optional[str] = Field(default=None, max_length=200)
+    priority: Optional[str] = None
+    target_content_type: Optional[str] = Field(default=None, max_length=60)
+    target_platforms: Optional[list[str]] = None
+    operator_note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class TopicPackageStatusUpdate(BaseModel):
+    status: str
+
+
+class TopicPackageFromContentItemsRequest(TopicPackageCreate):
+    content_item_ids: list[str] = Field(min_length=1, max_length=100)
+    primary_content_item_id: Optional[str] = None
+
+
+class TopicPackageItemBatchAddRequest(BaseModel):
+    content_item_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class TopicPackagePrimaryItemRequest(BaseModel):
+    content_item_id: str
+
+
+class TopicPackageItemsOrderRequest(BaseModel):
+    ordered_content_item_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class TopicPackageMergeRequest(BaseModel):
+    target_topic_package_id: str
+    source_topic_package_ids: list[str] = Field(min_length=1, max_length=100)
+    archive_sources: bool = True
