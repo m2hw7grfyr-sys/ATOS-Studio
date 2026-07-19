@@ -546,6 +546,48 @@ Current limits:
 - Video generation, TTS, subtitles, FFmpeg, publishing, Kling, Runway, and Veo are not implemented.
 - The default workflow is a placeholder. Replace `studio_generation_workflows.workflow_json` with a real ComfyUI API workflow before production use.
 
+## Workflow Studio And Model Capability Registry
+
+Sprint 11 adds a Workflow Studio page:
+
+```text
+http://127.0.0.1:8502/workflows
+```
+
+Workflow APIs:
+
+```bash
+curl -X POST http://127.0.0.1:8502/api/generation-workflows \
+  -H "Content-Type: application/json" \
+  -d '{"name":"FLUX image workflow","provider":"comfyui","workflow_type":"image_generation","workflow_json":{"prompt":{"1":{"inputs":{"text":"{{visual_prompt}}"}}}}}'
+
+curl -X POST http://127.0.0.1:8502/api/generation-workflows/{workflow_id}/test \
+  -H "Content-Type: application/json" \
+  -d '{"visual_prompt":"A simple test image"}'
+```
+
+Model Capability APIs:
+
+```bash
+curl -X POST http://127.0.0.1:8502/api/model-capabilities \
+  -H "Content-Type: application/json" \
+  -d '{"name":"FLUX.1 Schnell","provider":"comfyui","model_type":"image","status":"available"}'
+```
+
+Workflow lifecycle:
+
+```text
+draft -> testing -> available
+```
+
+Generation preflight checks:
+
+- Provider health
+- Workflow status is `available`
+- Required models are registered as `available`
+
+If a check fails, the Generation Task is marked `failed` and the queue shows the reason, such as `provider_offline`, `workflow_not_available`, or `missing_model`.
+
 ## Idempotency
 
 Duplicate imports do not create another row. Priority:

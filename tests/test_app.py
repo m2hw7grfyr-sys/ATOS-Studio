@@ -1023,16 +1023,25 @@ class ContentPoolTests(unittest.TestCase):
                 StudioGenerationWorkflow(
                     id="workflow-test-comfyui",
                     name="basic_image_generation",
+                    description="test workflow",
                     provider="comfyui",
                     workflow_type="image_generation",
+                    status="available",
                     workflow_json=stable_json({"prompt": {"1": {"inputs": {"text": "{{visual_prompt}}"}}}}),
+                    tags_json="[]",
+                    required_models_json="[]",
+                    test_result_json="{}",
                     version="test",
                     enabled=True,
+                    created_by="test",
                 )
             )
             db.commit()
 
         class FakeComfyUI:
+            def health_check(self):
+                return {"available": True, "status": "available"}
+
             def submit_job(self, workflow, context):
                 assert "visual_prompt" in context
                 return {"provider_task_id": "prompt-123", "raw_response": {"prompt_id": "prompt-123"}}
@@ -1077,6 +1086,110 @@ class ContentPoolTests(unittest.TestCase):
         self.assertEqual(disabled["status"], "disabled")
         unavailable = ComfyUIProvider(base_url="http://127.0.0.1:1", timeout_seconds=0.01, enabled=True).health_check()
         self.assertEqual(unavailable["status"], "unavailable")
+
+    def test_workflow_import_model_registry_and_preflight(self):
+        invalid = self.client.post(
+            "/api/generation-workflows",
+            json={
+                "name": "bad workflow",
+                "provider": "comfyui",
+                "workflow_type": "image_generation",
+                "workflow_json": "not json",
+            },
+        )
+        self.assertEqual(invalid.status_code, 422)
+        self.assertIn("Invalid workflow JSON", invalid.text)
+
+        model = self.client.post(
+            "/api/model-capabilities",
+            json={"name": "FLUX.1 Schnell", "provider": "comfyui", "model_type": "image", "status": "available"},
+        )
+        self.assertEqual(model.status_code, 200)
+        self.assertEqual(model.json()["status"], "available")
+
+        workflow = self.client.post(
+            "/api/generation-workflows",
+            json={
+                "name": "FLUX image workflow",
+                "description": "portrait workflow",
+                "provider": "comfyui",
+                "workflow_type": "image_generation",
+                "workflow_json": {"prompt": {"1": {"inputs": {"text": "{{visual_prompt}}"}}}},
+                "tags": ["portrait", "ugc"],
+                "required_models": [{"name": "FLUX.1 Schnell", "type": "image"}],
+            },
+        )
+        self.assertEqual(workflow.status_code, 200)
+        workflow_id = workflow.json()["id"]
+        self.assertEqual(workflow.json()["status"], "draft")
+
+        class FakeComfyUI:
+            def health_check(self):
+                return {"available": True, "status": "available"}
+
+            def submit_job(self, workflow, context):
+                return {"provider_task_id": "workflow-prompt", "raw_response": {"prompt_id": "workflow-prompt"}}
+
+            def get_result(self, provider_task_id):
+                return {
+                    "status": "completed",
+                    "assets": [{"asset_type": "image", "url": "http://127.0.0.1:8188/view?filename=workflow.png", "metadata": {}}],
+                }
+
+        with patch("services.generation_executor.get_generation_provider", return_value=FakeComfyUI()):
+            tested = self.client.post(f"/api/generation-workflows/{workflow_id}/test", json={"visual_prompt": "test"})
+        self.assertEqual(tested.status_code, 200)
+        self.assertEqual(tested.json()["status"], "available")
+        self.assertTrue(tested.json()["test_result"]["success"])
+
+        page = self.client.get("/workflows")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Workflow管理", page.text)
+        self.assertIn("FLUX image workflow", page.text)
+        self.assertIn("FLUX.1 Schnell", page.text)
+
+        missing_model_workflow = self.client.post(
+            "/api/generation-workflows",
+            json={
+                "name": "Missing model workflow",
+                "provider": "comfyui",
+                "workflow_type": "image_generation",
+                "status": "available",
+                "workflow_json": {"prompt": {"1": {"inputs": {"text": "{{visual_prompt}}"}}}},
+                "required_models": [{"name": "Missing Model", "type": "image"}],
+            },
+        ).json()
+        item_id = self.create_pushed_item("preflight-1", "Preflight image scene", 80, 10, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "Preflight scene", "content_item_ids": [item_id]},
+        ).json()
+        self.create_topic_intelligence_analysis(package["id"])
+        self.create_prompt("editorial")
+        prompt = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        brief = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": self.valid_editorial_output("Preflight Scene"),
+            },
+        ).json()
+        project = self.client.post(
+            "/api/video-projects/from-brief",
+            json={"editorial_brief_id": brief["id"], "creation_mode": "general"},
+        ).json()
+        scene_id = project["scenes"][0]["id"]
+
+        with patch("services.generation_executor.get_generation_provider", return_value=FakeComfyUI()):
+            failed = self.client.post(
+                f"/api/scenes/{scene_id}/generate-image",
+                params={"workflow_id": missing_model_workflow["id"]},
+            )
+        self.assertEqual(failed.status_code, 200)
+        self.assertEqual(failed.json()["task"]["status"], "failed")
+        self.assertEqual(failed.json()["task"]["error_message"], "missing_model")
 
 
 if __name__ == "__main__":

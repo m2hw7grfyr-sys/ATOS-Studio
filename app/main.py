@@ -72,11 +72,19 @@ from services.generation_planner import (
     list_generation_tasks,
 )
 from services.generation_executor import (
+    create_model_capability,
     create_scene_image_task,
+    create_workflow,
     list_workflows,
+    list_model_capabilities,
     run_generation_task,
     scene_assets,
+    serialize_model_capability,
+    serialize_workflow,
     task_assets,
+    test_workflow,
+    update_model_capability,
+    update_workflow,
 )
 from services.topic_intelligence_service import TOPIC_INTELLIGENCE_JOB_TYPE
 from services.topic_packages import (
@@ -130,6 +138,7 @@ NAV_ITEMS = [
     ("accounts", "/accounts", "账号管理"),
     ("video-projects", "/video-projects", "视频项目"),
     ("generation-queue", "/generation-queue", "生成队列"),
+    ("workflows", "/workflows", "Workflow管理"),
     ("assets", "/assets", "素材库"),
     ("renders", "/renders", "成片库"),
     ("settings", "/settings", "Studio设置"),
@@ -141,6 +150,7 @@ PLACEHOLDER_PAGES = {
     "gpt-director": "GPT编导",
     "accounts": "账号管理",
     "generation-queue": "生成队列",
+    "workflows": "Workflow管理",
     "assets": "素材库",
     "renders": "成片库",
     "settings": "Studio设置",
@@ -1886,13 +1896,53 @@ def generation_provider_health_api(provider_name: str) -> dict:
 
 
 @app.get("/api/generation-workflows")
-def generation_workflows_api(provider: str = "", workflow_type: str = "", db: Session = Depends(get_db)) -> dict:
-    return {"items": list_workflows(db, provider or None, workflow_type or None)}
+def generation_workflows_api(provider: str = "", workflow_type: str = "", status_filter: str = Query(default="", alias="status"), db: Session = Depends(get_db)) -> dict:
+    return {"items": list_workflows(db, provider or None, workflow_type or None, status_filter or None)}
+
+
+@app.post("/api/generation-workflows")
+def create_generation_workflow_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = create_workflow(db, payload)
+    db.commit()
+    return serialize_workflow(row)
+
+
+@app.put("/api/generation-workflows/{workflow_id}")
+def update_generation_workflow_api(workflow_id: str, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = update_workflow(db, workflow_id, payload)
+    db.commit()
+    return serialize_workflow(row)
+
+
+@app.post("/api/generation-workflows/{workflow_id}/test")
+def test_generation_workflow_api(workflow_id: str, payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    row = test_workflow(db, workflow_id, str(payload.get("visual_prompt") or "A simple test image"))
+    db.commit()
+    return row
+
+
+@app.get("/api/model-capabilities")
+def model_capabilities_api(provider: str = "", model_type: str = "", status_filter: str = Query(default="", alias="status"), db: Session = Depends(get_db)) -> dict:
+    return {"items": list_model_capabilities(db, provider or None, model_type or None, status_filter or None)}
+
+
+@app.post("/api/model-capabilities")
+def create_model_capability_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = create_model_capability(db, payload)
+    db.commit()
+    return serialize_model_capability(row)
+
+
+@app.put("/api/model-capabilities/{model_id}")
+def update_model_capability_api(model_id: str, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = update_model_capability(db, model_id, payload)
+    db.commit()
+    return serialize_model_capability(row)
 
 
 @app.post("/api/scenes/{scene_id}/generate-image")
-def create_scene_image_task_api(scene_id: str, run_now: bool = True, db: Session = Depends(get_db)) -> dict:
-    task = create_scene_image_task(db, scene_id, "comfyui")
+def create_scene_image_task_api(scene_id: str, run_now: bool = True, workflow_id: str = "", db: Session = Depends(get_db)) -> dict:
+    task = create_scene_image_task(db, scene_id, "comfyui", workflow_id or None)
     if run_now:
         payload = run_generation_task(db, task.id)
     else:
@@ -2116,6 +2166,16 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
     project = serialize_video_project(db, row, include_detail=True)
     brief = project.get("editorial_brief") or {}
     output = brief.get("output") or {}
+    available_workflows = list_workflows(db, "comfyui", "image_generation", "available")
+    workflow_options = "".join(
+        f'<option value="{escape(workflow["id"])}">{escape(workflow["name"])} · {escape(workflow.get("version") or "")}</option>'
+        for workflow in available_workflows
+    )
+    workflow_select = (
+        f'<select class="field" name="workflow_id">{workflow_options}</select>'
+        if workflow_options
+        else '<span class="status-warn">没有 available Workflow，请先到 Workflow管理 测试并启用</span>'
+    )
     scenes_rows = ""
     for scene in project.get("scenes") or []:
         assets = scene_assets(db, scene["id"])
@@ -2138,7 +2198,7 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
             f'<td>{escape(latest_task.get("status") or scene.get("status") or "等待")}</td>'
             f'<td>{preview}</td>'
             '<td><div class="actions">'
-            f'<form method="post" action="/scenes/{escape(scene["id"])}/generate-image-form"><input type="hidden" name="project_id" value="{escape(project["id"])}"><button class="button" type="submit">生成画面</button></form>'
+            f'<form method="post" action="/scenes/{escape(scene["id"])}/generate-image-form"><input type="hidden" name="project_id" value="{escape(project["id"])}">{workflow_select}<button class="button" type="submit">生成画面</button></form>'
             "</div></td>"
             "</tr>"
         )
@@ -2242,7 +2302,7 @@ async def scene_generate_image_form(scene_id: str, request: Request, db: Session
     form = await parse_urlencoded(request)
     project_id = form.get("project_id", "")
     try:
-        task = create_scene_image_task(db, scene_id, "comfyui")
+        task = create_scene_image_task(db, scene_id, "comfyui", form.get("workflow_id") or None)
         payload = run_generation_task(db, task.id)
         db.commit()
         status_label = payload["task"]["status"]
@@ -2293,12 +2353,13 @@ def generation_queue(
             f'<td>{escape(task.get("provider_task_id") or "")}</td>'
             f'<td>{escape(task["status"])}</td>'
             f'<td>{escape(asset_status)}</td>'
+            f'<td>{escape(task.get("error_message") or "")}</td>'
             f'<td>{escape(task.get("created_at") or "")}</td>'
             f'<td>{escape(task.get("updated_at") or "")}</td>'
             "</tr>"
         )
     table = (
-        "<table><thead><tr><th>Task ID</th><th>项目</th><th>类型</th><th>Provider</th><th>Provider Task ID</th><th>状态</th><th>Asset状态</th><th>创建时间</th><th>更新时间</th></tr></thead><tbody>"
+        "<table><thead><tr><th>Task ID</th><th>项目</th><th>类型</th><th>Provider</th><th>Provider Task ID</th><th>状态</th><th>Asset状态</th><th>错误</th><th>创建时间</th><th>更新时间</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
         if tasks
@@ -2332,6 +2393,140 @@ def generation_queue(
       </section>
     """
     return render_shell("generation-queue", "生成队列", body)
+
+
+@app.get("/workflows", response_class=HTMLResponse)
+def workflows_page(
+    msg: str = "",
+    level: str = "ok",
+    provider: str = "",
+    workflow_type: str = "",
+    status_filter: str = Query(default="", alias="status"),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    workflows = list_workflows(db, provider or None, workflow_type or None, status_filter or None)
+    models = list_model_capabilities(db)
+    workflow_rows = "".join(
+        "<tr>"
+        f'<td>{escape(row["name"])}</td>'
+        f'<td>{escape(row["provider"])}</td>'
+        f'<td>{escape(row["workflow_type"])}</td>'
+        f'<td>{escape(row["status"])}</td>'
+        f'<td>{escape(", ".join(row.get("tags") or []))}</td>'
+        f'<td>{escape(row.get("updated_at") or "")}</td>'
+        f'<td><details><summary>测试结果</summary><pre>{escape(json.dumps(row.get("test_result") or {}, ensure_ascii=False, indent=2))}</pre></details></td>'
+        '<td><div class="actions">'
+        f'<form method="post" action="/workflows/{escape(row["id"])}/test-form"><button class="button secondary" type="submit">测试Workflow</button></form>'
+        "</div></td>"
+        "</tr>"
+        for row in workflows
+    )
+    model_rows = "".join(
+        "<tr>"
+        f'<td>{escape(row["name"])}</td>'
+        f'<td>{escape(row["provider"])}</td>'
+        f'<td>{escape(row["model_type"])}</td>'
+        f'<td>{escape(row.get("version") or "")}</td>'
+        f'<td>{escape(row["status"])}</td>'
+        f'<td>{escape(row.get("updated_at") or "")}</td>'
+        "</tr>"
+        for row in models
+    )
+    body = f"""
+      <h1>Workflow管理</h1>
+      <p class="subtitle">导入、校验、测试 ComfyUI Workflow，并维护模型能力注册表。当前只支持图片生成 Workflow。</p>
+      {message_html(msg, level)}
+      <section class="panel">
+        <h2>导入Workflow</h2>
+        <form method="post" action="/workflows/import-form" class="toolbar">
+          <label>名称<br><input class="field" name="name" placeholder="basic_image_generation" required></label>
+          <label>描述<br><input class="field" name="description" placeholder="FLUX portrait workflow"></label>
+          <label>Provider<br><input class="field" name="provider" value="comfyui"></label>
+          <label>Workflow类型<br><select class="field" name="workflow_type"><option value="image_generation">image_generation</option><option value="video_generation">video_generation</option><option value="voice_generation">voice_generation</option><option value="composition">composition</option></select></label>
+          <label>版本<br><input class="field" name="version" value="v1"></label>
+          <label>标签，逗号分隔<br><input class="field" name="tags" placeholder="realistic,portrait,ugc"></label>
+          <label>需要模型 JSON<br><textarea class="field" name="required_models_json">[]</textarea></label>
+          <label>Workflow JSON<br><textarea class="field" name="workflow_json" style="min-width:420px;min-height:180px" required>{{"prompt":{{"1":{{"inputs":{{"text":"{{{{visual_prompt}}}}"}}}}}}}}</textarea></label>
+          <button class="button" type="submit">导入Workflow</button>
+        </form>
+      </section>
+      <section class="panel">
+        <form method="get" action="/workflows" class="toolbar">
+          <label>Provider<br><input class="field" name="provider" value="{escape(provider)}" placeholder="comfyui"></label>
+          <label>Type<br><input class="field" name="workflow_type" value="{escape(workflow_type)}" placeholder="image_generation"></label>
+          <label>Status<br><input class="field" name="status" value="{escape(status_filter)}" placeholder="available"></label>
+          <button class="button secondary" type="submit">筛选</button>
+        </form>
+        <h2>Workflow列表</h2>
+        {("<table><thead><tr><th>名称</th><th>Provider</th><th>类型</th><th>状态</th><th>标签</th><th>更新时间</th><th>测试</th><th>操作</th></tr></thead><tbody>" + workflow_rows + "</tbody></table>") if workflows else '<div class="placeholder">暂无 Workflow</div>'}
+      </section>
+      <section class="panel">
+        <h2>添加模型能力</h2>
+        <form method="post" action="/workflows/model-create-form" class="toolbar">
+          <label>模型名称<br><input class="field" name="name" placeholder="FLUX.1 Schnell" required></label>
+          <label>Provider<br><input class="field" name="provider" value="comfyui"></label>
+          <label>类型<br><select class="field" name="model_type"><option value="image">image</option><option value="video">video</option><option value="audio">audio</option><option value="text">text</option></select></label>
+          <label>版本<br><input class="field" name="version" placeholder="v1"></label>
+          <label>状态<br><select class="field" name="status"><option value="available">available</option><option value="missing">missing</option><option value="disabled">disabled</option></select></label>
+          <button class="button" type="submit">添加模型能力</button>
+        </form>
+        <h2>模型能力</h2>
+        {("<table><thead><tr><th>名称</th><th>Provider</th><th>类型</th><th>版本</th><th>状态</th><th>更新时间</th></tr></thead><tbody>" + model_rows + "</tbody></table>") if models else '<div class="placeholder">暂无模型能力</div>'}
+      </section>
+    """
+    return render_shell("workflows", "Workflow管理", body)
+
+
+@app.post("/workflows/import-form")
+async def workflow_import_form(request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    try:
+        tags = [item.strip() for item in form.get("tags", "").split(",") if item.strip()]
+        required_models = json.loads(form.get("required_models_json") or "[]")
+        create_workflow(
+            db,
+            {
+                "name": form.get("name", ""),
+                "description": form.get("description", ""),
+                "provider": form.get("provider", "comfyui"),
+                "workflow_type": form.get("workflow_type", "image_generation"),
+                "workflow_json": form.get("workflow_json", "{}"),
+                "tags": tags,
+                "required_models": required_models,
+                "version": form.get("version", "v1"),
+                "status": "draft",
+            },
+        )
+        db.commit()
+        return RedirectResponse("/workflows?msg=Workflow已导入", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/workflows?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/workflows/{workflow_id}/test-form")
+async def workflow_test_form(workflow_id: str, db: Session = Depends(get_db)):
+    try:
+        result = test_workflow(db, workflow_id)
+        db.commit()
+        test_result = result.get("test_result") or {}
+        level = "ok" if test_result.get("success") else "warn"
+        return RedirectResponse(f"/workflows?level={level}&msg=Workflow测试完成：{quote(result['status'])}", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/workflows?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/workflows/model-create-form")
+async def workflow_model_create_form(request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    try:
+        create_model_capability(db, dict(form))
+        db.commit()
+        return RedirectResponse("/workflows?msg=模型能力已添加", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/workflows?level=warn&msg={quote(str(exc))}", status_code=303)
 
 
 @app.get("/assets", response_class=HTMLResponse)

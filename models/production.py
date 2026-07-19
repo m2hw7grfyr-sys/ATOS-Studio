@@ -123,9 +123,16 @@ class StudioGenerationWorkflow(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     name: Mapped[str] = mapped_column(String(200), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
     provider: Mapped[str] = mapped_column(String(120), index=True)
     workflow_type: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="draft", index=True)
     workflow_json: Mapped[str] = mapped_column(Text, default="{}")
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    required_models_json: Mapped[str] = mapped_column(Text, default="[]")
+    test_result_json: Mapped[str] = mapped_column(Text, default="{}")
+    last_tested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(String(120), default="operator", index=True)
     version: Mapped[str] = mapped_column(String(80), default="v1", index=True)
     enabled: Mapped[bool] = mapped_column(default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -143,3 +150,17 @@ class StudioAsset(Base):
     generation_task_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_tasks.id"), index=True)
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class StudioModelCapability(Base):
+    __tablename__ = "studio_model_capabilities"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    provider: Mapped[str] = mapped_column(String(120), index=True)
+    model_type: Mapped[str] = mapped_column(String(40), index=True)
+    version: Mapped[str] = mapped_column(String(80), default="")
+    status: Mapped[str] = mapped_column(String(40), default="missing", index=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
