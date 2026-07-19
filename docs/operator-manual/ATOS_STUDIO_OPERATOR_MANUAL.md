@@ -77,6 +77,34 @@ GPT 编导页用于把主题包和 AI 分析结果整理成可复制给 ChatGPT 
 - 查看 Editorial Brief 历史版本
 - 将 Brief 标记为审核中或已批准
 
+### 账号管理
+
+账号管理页用于维护 Persona 和真实发布账号。
+
+当前只保存生产规划，不会自动登录、不会自动发布。
+
+可执行：
+
+- 创建 Persona
+- 禁用 Persona
+- 添加 Social Account
+- 绑定 Social Account 到 Persona
+
+### 视频项目
+
+视频项目页用于查看从 Editorial Brief 创建的视频生产计划。
+
+当前只做管理，不执行视频生成。
+
+可查看：
+
+- 项目基础信息
+- 绑定 Persona
+- 绑定发布账号
+- Script
+- Scenes
+- Generation 状态占位
+
 ## 4. 按钮说明
 
 ### 内容池按钮
@@ -350,7 +378,114 @@ ChatGPT 返回内容必须是 JSON。
 - 视频模型
 - ComfyUI
 
-## 8. 常见问题
+## 8. Persona与账号管理
+
+### 什么是Persona
+
+Persona 是账号人格设定。
+
+它描述一个账号应该像谁、对谁说话、用什么语气、避免什么表达。
+
+例如：
+
+```json
+{
+  "identity": "college student",
+  "age_range": "18-25",
+  "tone": "casual",
+  "language": "american english",
+  "style": "personal storytelling",
+  "avoid": ["medical claims"]
+}
+```
+
+### 为什么不同账号需要不同人格
+
+不同账号面对的人群、内容风格和风险边界不同。
+
+例如：
+
+- 学生人设适合个人经历表达。
+- 教育人设适合解释型内容。
+- 效率教练适合方法论内容。
+
+把 Persona 固定下来，可以让后续 Prompt、脚本和视觉风格更一致。
+
+### 如何创建Persona
+
+1. 打开 `账号管理`。
+2. 在 `创建 Persona` 区域填写名称、描述、目标用户和风格。
+3. 填写 Persona Profile JSON。
+4. 点击 `创建`。
+
+### 如何绑定账号
+
+1. 在 `添加 Social Account` 区域填写平台和用户名。
+2. 选择一个 Persona。
+3. 选择状态：testing、active 或 inactive。
+4. 点击 `添加账号`。
+
+一个 Persona 可以绑定多个账号。
+
+### 如何禁用Persona
+
+在 Personas 列表点击 `禁用`。
+
+禁用后，该 Persona 不应再用于新的视频项目。
+
+## 9. 视频项目管理
+
+### 从Editorial Brief创建项目
+
+1. 打开 `GPT编导`。
+2. 选择主题包和 Persona。
+3. 保存一个合法的 Editorial Brief JSON。
+4. 在历史版本列表中选择发布账号。
+5. 点击 `创建视频项目`。
+
+系统会创建 Video Project，并从 Brief 的 `scenes` 初始化分镜。
+
+### 选择Persona
+
+Persona 会影响 GPT Prompt。
+
+生成 Prompt 前选择 Persona，Prompt 会包含：
+
+- Identity
+- Tone
+- Audience
+- Language
+- Style
+- Voice
+- Avoid rules
+
+### 选择发布账号
+
+发布账号会按照 Persona 过滤。
+
+例如选择 Sarah Persona 后，只显示绑定 Sarah 的 TikTok、YouTube 等账号。
+
+### 查看生产状态
+
+打开 `视频项目` 页面。
+
+详情页显示：
+
+- 基础信息
+- Script
+- Scenes
+- Generation 状态
+
+当前 Generation 状态只是占位：
+
+- 图片生成
+- 视频生成
+- 配音
+- 合成
+
+Sprint 08 不会真正连接视频模型。
+
+## 10. 常见问题
 
 ### AI任务失败
 
@@ -380,7 +515,7 @@ ChatGPT 返回内容必须是 JSON。
 }
 ```
 
-## 9. 当前未实现能力
+## 11. 当前未实现能力
 
 - 视频生成
 - ComfyUI

@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from models.ai import StudioAIAnalysis, StudioEditorialBrief
+from models.production import StudioPersona
 from repositories.content_items import parse_json, stable_json
 from schemas.editorial_brief import validate_editorial_brief_json
 from services.ai_service import active_prompt_for_category
@@ -34,22 +35,45 @@ def latest_topic_intelligence(db: Session, topic_package_id: str) -> StudioAIAna
     return row
 
 
-def editorial_context(db: Session, topic_package_id: str) -> dict[str, Any]:
+def serialize_prompt_persona(row: StudioPersona) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "description": row.description,
+        "target_audience": row.target_audience,
+        "persona_profile": parse_json(row.persona_profile_json, {}),
+        "tone_style": row.tone_style,
+        "language_style": row.language_style,
+        "visual_style": row.visual_style,
+        "voice_style": row.voice_style,
+        "content_rules": parse_json(row.content_rules_json, {}),
+    }
+
+
+def editorial_context(db: Session, topic_package_id: str, persona_id: Optional[str] = None) -> dict[str, Any]:
     package = db.get(StudioTopicPackage, topic_package_id)
     if not package:
         raise HTTPException(status_code=404, detail="topic package not found")
     topic_intelligence = latest_topic_intelligence(db, topic_package_id)
-    return {
+    persona = None
+    if persona_id:
+        persona = db.get(StudioPersona, persona_id)
+        if not persona or not persona.enabled:
+            raise HTTPException(status_code=422, detail="enabled persona not found")
+    payload = {
         "topic_package": serialize_topic_package(db, package, include_items=True),
         "topic_intelligence": parse_json(topic_intelligence.result_json, {}),
         "topic_intelligence_analysis_id": topic_intelligence.id,
         "topic_intelligence_provider": topic_intelligence.provider,
         "topic_intelligence_model": topic_intelligence.model,
     }
+    if persona:
+        payload["persona"] = serialize_prompt_persona(persona)
+    return payload
 
 
-def build_editorial_prompt(db: Session, topic_package_id: str) -> dict[str, Any]:
-    context = editorial_context(db, topic_package_id)
+def build_editorial_prompt(db: Session, topic_package_id: str, persona_id: Optional[str] = None) -> dict[str, Any]:
+    context = editorial_context(db, topic_package_id, persona_id)
     template = active_prompt_for_category(db, EDITORIAL_PROMPT_CATEGORY)
     required_output = {
         "title": "",
@@ -69,8 +93,25 @@ def build_editorial_prompt(db: Session, topic_package_id: str) -> dict[str, Any]
         "caption": "",
         "hashtags": [],
     }
+    persona = context.get("persona") or {}
+    persona_block = ""
+    if persona:
+        profile = persona.get("persona_profile") or {}
+        rules = persona.get("content_rules") or {}
+        persona_block = (
+            "\n\nCreate content for this persona:\n"
+            f"Name: {persona.get('name')}\n"
+            f"Identity: {profile.get('identity') or persona.get('description')}\n"
+            f"Tone: {profile.get('tone') or persona.get('tone_style')}\n"
+            f"Audience: {persona.get('target_audience')}\n"
+            f"Language: {profile.get('language') or persona.get('language_style')}\n"
+            f"Style: {profile.get('style') or persona.get('visual_style')}\n"
+            f"Voice: {persona.get('voice_style')}\n"
+            f"Avoid: {json.dumps(profile.get('avoid') or rules.get('avoid') or [], ensure_ascii=False)}"
+        )
     prompt = (
         f"{template.template}\n\n"
+        f"{persona_block}\n\n"
         "请只输出严格 JSON，不要输出 Markdown，不要添加解释。\n"
         f"输出结构必须符合：\n{json.dumps(required_output, ensure_ascii=False, indent=2)}\n\n"
         f"素材上下文 JSON：\n{json.dumps(context, ensure_ascii=False, indent=2)}"

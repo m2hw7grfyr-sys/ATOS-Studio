@@ -351,6 +351,14 @@ It also stores manually pasted GPT Output JSON as versioned Editorial Briefs.
 
 Sprint 07 does not call GPT APIs and does not generate video. The operator manually copies the generated prompt into ChatGPT, then pastes the returned JSON back into Studio.
 
+Sprint 08 adds the production management layer:
+
+```text
+Editorial Brief -> Persona -> Social Account -> Video Project -> Scenes -> future generation tasks
+```
+
+It does not connect ComfyUI, video models, TTS, FFmpeg, or automatic publishing.
+
 Open:
 
 ```text
@@ -388,6 +396,59 @@ Each scene requires:
 - `subtitle`
 
 Each save creates a new version. Old versions are retained and visible in the Editorial Studio page.
+
+## Persona And Video Projects
+
+Personas define the publishing identity and style used by Editorial Studio prompts.
+
+Open:
+
+```text
+http://127.0.0.1:8502/accounts
+```
+
+Persona fields include:
+
+- name
+- description
+- target_audience
+- persona_profile JSON
+- tone_style
+- language_style
+- visual_style
+- voice_style
+- content_rules JSON
+
+Social accounts bind a real publishing account to one Persona:
+
+- platform
+- username
+- display_name
+- persona_id
+- status
+- publishing_rules JSON
+
+Generate an Editorial Prompt for a specific Persona:
+
+```bash
+curl "http://127.0.0.1:8502/api/topic-packages/{topic_package_id}/editorial-prompt?persona_id={persona_id}"
+```
+
+Create a Video Project from an Editorial Brief:
+
+```bash
+curl -X POST http://127.0.0.1:8502/api/video-projects/from-brief \
+  -H "Content-Type: application/json" \
+  -d '{"editorial_brief_id":"brief-uuid","persona_id":"persona-uuid","social_account_id":"account-uuid"}'
+```
+
+Open:
+
+```text
+http://127.0.0.1:8502/video-projects
+```
+
+Video Projects initialize scenes from the Editorial Brief `scenes` JSON. Generation Tasks are table scaffolds only in Sprint 08; they are not executed.
 
 ## Idempotency
 

@@ -15,6 +15,7 @@ from config.settings import get_settings
 from database import get_db
 from models.content_item import StudioContentItem
 from models.ai import StudioEditorialBrief
+from models.production import StudioPersona, StudioSocialAccount
 from models.topic_package import StudioTopicPackage
 from models.schemas import (
     ContentItemStatusBatchRequest,
@@ -79,6 +80,19 @@ from services.topic_packages import (
     update_topic_package,
     update_topic_package_status,
 )
+from services.video_production import (
+    create_persona,
+    create_social_account,
+    create_video_project_from_brief,
+    list_personas,
+    list_social_accounts,
+    list_video_projects,
+    serialize_persona,
+    serialize_social_account,
+    serialize_video_project,
+    update_persona,
+    update_social_account,
+)
 
 
 settings = get_settings()
@@ -95,6 +109,7 @@ NAV_ITEMS = [
     ("content-pool", "/content-pool", "内容池"),
     ("topic-packages", "/topic-packages", "主题包"),
     ("gpt-director", "/gpt-director", "GPT编导"),
+    ("accounts", "/accounts", "账号管理"),
     ("video-projects", "/video-projects", "视频项目"),
     ("generation-queue", "/generation-queue", "生成队列"),
     ("assets", "/assets", "素材库"),
@@ -106,6 +121,7 @@ PLACEHOLDER_PAGES = {
     "inspiration": "灵感中心",
     "video-projects": "视频项目",
     "gpt-director": "GPT编导",
+    "accounts": "账号管理",
     "generation-queue": "生成队列",
     "assets": "素材库",
     "renders": "成片库",
@@ -1472,8 +1488,8 @@ def topic_ai_analyses_api(topic_package_id: str, db: Session = Depends(get_db)) 
 
 
 @app.get("/api/topic-packages/{topic_package_id}/editorial-prompt")
-def topic_editorial_prompt_api(topic_package_id: str, db: Session = Depends(get_db)) -> dict:
-    return build_editorial_prompt(db, topic_package_id)
+def topic_editorial_prompt_api(topic_package_id: str, persona_id: str = "", db: Session = Depends(get_db)) -> dict:
+    return build_editorial_prompt(db, topic_package_id, persona_id or None)
 
 
 @app.post("/topic-packages/{topic_package_id}/ai-analyze-form")
@@ -1515,6 +1531,7 @@ async def ai_job_run_form(job_id: str, request: Request, db: Session = Depends(g
 @app.get("/gpt-director", response_class=HTMLResponse)
 def gpt_director_page(
     topic_package_id: str = "",
+    persona_id: str = "",
     generate: int = 0,
     msg: str = "",
     level: str = "ok",
@@ -1522,6 +1539,9 @@ def gpt_director_page(
 ) -> HTMLResponse:
     packages = list_topic_packages(db, limit=100)["items"]
     selected_id = topic_package_id or (packages[0]["id"] if packages else "")
+    personas = list_personas(db, enabled=True)
+    selected_persona_id = persona_id or (personas[0]["id"] if personas else "")
+    social_accounts = list_social_accounts(db, persona_id=selected_persona_id or None)
     selected = db.get(StudioTopicPackage, selected_id) if selected_id else None
     context = {}
     prompt_payload = {}
@@ -1530,9 +1550,9 @@ def gpt_director_page(
     context_notice = ""
     if selected_id:
         try:
-            context = editorial_context(db, selected_id)
+            context = editorial_context(db, selected_id, selected_persona_id or None)
             if generate:
-                prompt_payload = build_editorial_prompt(db, selected_id)
+                prompt_payload = build_editorial_prompt(db, selected_id, selected_persona_id or None)
                 prompt_text = prompt_payload["prompt"]
                 prompt_template_id = prompt_payload["prompt_template_id"]
         except Exception as exc:
@@ -1551,6 +1571,14 @@ def gpt_director_page(
     options = "".join(
         f'<option value="{escape(package["id"])}" {"selected" if package["id"] == selected_id else ""}>{escape(package["title"])}</option>'
         for package in packages
+    )
+    persona_options = "".join(
+        f'<option value="{escape(persona["id"])}" {"selected" if persona["id"] == selected_persona_id else ""}>{escape(persona["name"])}</option>'
+        for persona in personas
+    )
+    account_options = '<option value="">不绑定发布账号</option>' + "".join(
+        f'<option value="{escape(account["id"])}">{escape(account["platform"])} @{escape(account["username"])}</option>'
+        for account in social_accounts
     )
     topic_context = context.get("topic_package") or {}
     intelligence = context.get("topic_intelligence") or {}
@@ -1616,8 +1644,9 @@ def gpt_director_page(
             f'<td>{escape(str((row.get("output") or {}).get("hook") or ""))}</td>'
             f'<td><details><summary>查看旧版本</summary><pre>{escape(json.dumps(row.get("output") or {}, ensure_ascii=False, indent=2))}</pre></details></td>'
             '<td><div class="actions">'
-            f'<form method="post" action="/gpt-director/brief-status-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="brief_id" value="{escape(row["id"])}"><input type="hidden" name="status" value="reviewing"><button class="button secondary" type="submit">进入审核</button></form>'
-            f'<form method="post" action="/gpt-director/brief-status-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="brief_id" value="{escape(row["id"])}"><input type="hidden" name="status" value="approved"><button class="button" type="submit">批准</button></form>'
+            f'<form method="post" action="/gpt-director/brief-status-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="persona_id" value="{escape(selected_persona_id)}"><input type="hidden" name="brief_id" value="{escape(row["id"])}"><input type="hidden" name="status" value="reviewing"><button class="button secondary" type="submit">进入审核</button></form>'
+            f'<form method="post" action="/gpt-director/brief-status-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="persona_id" value="{escape(selected_persona_id)}"><input type="hidden" name="brief_id" value="{escape(row["id"])}"><input type="hidden" name="status" value="approved"><button class="button" type="submit">批准</button></form>'
+            f'<form method="post" action="/video-projects/create-from-brief-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="editorial_brief_id" value="{escape(row["id"])}"><input type="hidden" name="persona_id" value="{escape(selected_persona_id)}"><select class="field" name="social_account_id">{account_options}</select><button class="button secondary" type="submit">创建视频项目</button></form>'
             "</div></td>"
             "</tr>"
             for row in saved_briefs
@@ -1627,7 +1656,6 @@ def gpt_director_page(
         else '<div class="placeholder">暂无 Editorial Brief 版本</div>'
     )
     prompt_notice = message_html(context_notice, "warn") if context_notice else ""
-    prompt_form_action = f"/gpt-director?topic_package_id={escape(selected_id)}&generate=1"
     body = f"""
       <h1>GPT编导</h1>
       <p class="subtitle">Editorial Studio：整理 AI 分析结果，生成可复制给 ChatGPT 的 Prompt，并保存人工粘贴回来的视频编导 JSON。</p>
@@ -1635,6 +1663,7 @@ def gpt_director_page(
       <section class="panel">
         <form method="get" action="/gpt-director" class="toolbar">
           <label>选择主题包<br><select class="field" name="topic_package_id">{options}</select></label>
+          <label>选择Persona<br><select class="field" name="persona_id">{persona_options}</select></label>
           <button class="button secondary" type="submit">加载</button>
         </form>
       </section>
@@ -1659,6 +1688,7 @@ def gpt_director_page(
         <h2>生成GPT Prompt</h2>
         <form method="get" action="/gpt-director" class="toolbar">
           <input type="hidden" name="topic_package_id" value="{escape(selected_id)}">
+          <input type="hidden" name="persona_id" value="{escape(selected_persona_id)}">
           <input type="hidden" name="generate" value="1">
           <button class="button" type="submit">生成GPT Prompt</button>
         </form>
@@ -1669,6 +1699,7 @@ def gpt_director_page(
         <h2>GPT结果输入</h2>
         <form method="post" action="/gpt-director/save-brief-form" class="toolbar">
           <input type="hidden" name="topic_package_id" value="{escape(selected_id)}">
+          <input type="hidden" name="persona_id" value="{escape(selected_persona_id)}">
           <input type="hidden" name="prompt_snapshot" value="{escape(prompt_text)}">
           <input type="hidden" name="prompt_template_id" value="{escape(prompt_template_id)}">
           <label style="width:100%">GPT Output JSON<br><textarea class="field" style="width:100%; min-height:220px;" name="output_json">{{}}</textarea></label>
@@ -1687,6 +1718,7 @@ def gpt_director_page(
 async def gpt_director_save_brief_form(request: Request, db: Session = Depends(get_db)):
     form = await parse_urlencoded(request)
     topic_package_id = form.get("topic_package_id", "")
+    persona_id = form.get("persona_id", "")
     try:
         save_editorial_output(
             db,
@@ -1698,23 +1730,24 @@ async def gpt_director_save_brief_form(request: Request, db: Session = Depends(g
             status="draft",
         )
         db.commit()
-        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&msg=Editorial Brief 版本已保存", status_code=303)
+        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&persona_id={persona_id}&msg=Editorial Brief 版本已保存", status_code=303)
     except Exception as exc:
         db.rollback()
-        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&level=warn&msg={quote(str(exc))}", status_code=303)
+        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&persona_id={persona_id}&level=warn&msg={quote(str(exc))}", status_code=303)
 
 
 @app.post("/gpt-director/brief-status-form")
 async def gpt_director_brief_status_form(request: Request, db: Session = Depends(get_db)):
     form = await parse_urlencoded(request)
     topic_package_id = form.get("topic_package_id", "")
+    persona_id = form.get("persona_id", "")
     try:
         update_editorial_brief_status(db, form.get("brief_id", ""), form.get("status", ""))
         db.commit()
-        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&msg=Editorial Brief 状态已更新", status_code=303)
+        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&persona_id={persona_id}&msg=Editorial Brief 状态已更新", status_code=303)
     except Exception as exc:
         db.rollback()
-        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&level=warn&msg={quote(str(exc))}", status_code=303)
+        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&persona_id={persona_id}&level=warn&msg={quote(str(exc))}", status_code=303)
 
 
 @app.post("/api/editorial-briefs")
@@ -1741,6 +1774,325 @@ def update_editorial_brief_status_api(brief_id: str, payload: dict = Body(...), 
     return serialize_editorial_brief(row)
 
 
+@app.get("/api/personas")
+def personas_api(enabled: Optional[bool] = None, db: Session = Depends(get_db)) -> dict:
+    return {"items": list_personas(db, enabled)}
+
+
+@app.post("/api/personas")
+def create_persona_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = create_persona(db, payload)
+    db.commit()
+    return serialize_persona(row)
+
+
+@app.put("/api/personas/{persona_id}")
+def update_persona_api(persona_id: str, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = update_persona(db, persona_id, payload)
+    db.commit()
+    return serialize_persona(row)
+
+
+@app.get("/api/social-accounts")
+def social_accounts_api(persona_id: str = "", active_only: bool = False, db: Session = Depends(get_db)) -> dict:
+    return {"items": list_social_accounts(db, persona_id or None, active_only)}
+
+
+@app.post("/api/social-accounts")
+def create_social_account_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = create_social_account(db, payload)
+    db.commit()
+    return serialize_social_account(row, db.get(StudioPersona, row.persona_id) if row.persona_id else None)
+
+
+@app.put("/api/social-accounts/{account_id}")
+def update_social_account_api(account_id: str, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = update_social_account(db, account_id, payload)
+    db.commit()
+    return serialize_social_account(row, db.get(StudioPersona, row.persona_id) if row.persona_id else None)
+
+
+@app.get("/api/video-projects")
+def video_projects_api(status_filter: str = Query(default="", alias="status"), db: Session = Depends(get_db)) -> dict:
+    return {"items": list_video_projects(db, status_filter or None)}
+
+
+@app.post("/api/video-projects/from-brief")
+def create_video_project_from_brief_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = create_video_project_from_brief(
+        db,
+        str(payload.get("editorial_brief_id") or ""),
+        str(payload.get("persona_id") or ""),
+        str(payload.get("social_account_id") or "") or None,
+        str(payload.get("priority") or "normal"),
+    )
+    db.commit()
+    return serialize_video_project(db, row, include_detail=True)
+
+
+@app.get("/accounts", response_class=HTMLResponse)
+def accounts_page(msg: str = "", level: str = "ok", db: Session = Depends(get_db)) -> HTMLResponse:
+    personas = list_personas(db)
+    accounts = list_social_accounts(db)
+    persona_options = "".join(
+        f'<option value="{escape(persona["id"])}">{escape(persona["name"])}</option>'
+        for persona in personas
+        if persona["enabled"]
+    )
+    personas_html = (
+        "<table><thead><tr><th>名称</th><th>描述</th><th>目标用户</th><th>语气</th><th>语言</th><th>视觉</th><th>启用</th><th>操作</th></tr></thead><tbody>"
+        + "".join(
+            "<tr>"
+            f'<td>{escape(persona["name"])}</td>'
+            f'<td>{escape(persona.get("description") or "")}</td>'
+            f'<td>{escape(persona.get("target_audience") or "")}</td>'
+            f'<td>{escape(persona.get("tone_style") or "")}</td>'
+            f'<td>{escape(persona.get("language_style") or "")}</td>'
+            f'<td>{escape(persona.get("visual_style") or "")}</td>'
+            f'<td>{"是" if persona["enabled"] else "否"}</td>'
+            '<td><div class="actions">'
+            f'<form method="post" action="/accounts/persona-disable-form"><input type="hidden" name="persona_id" value="{escape(persona["id"])}"><button class="button secondary" type="submit">禁用</button></form>'
+            "</div></td>"
+            "</tr>"
+            for persona in personas
+        )
+        + "</tbody></table>"
+        if personas
+        else '<div class="placeholder">暂无 Persona</div>'
+    )
+    accounts_html = (
+        "<table><thead><tr><th>平台</th><th>用户名</th><th>显示名</th><th>绑定Persona</th><th>状态</th><th>备注</th></tr></thead><tbody>"
+        + "".join(
+            "<tr>"
+            f'<td>{escape(account["platform"])}</td>'
+            f'<td>@{escape(account["username"])}</td>'
+            f'<td>{escape(account.get("display_name") or "")}</td>'
+            f'<td>{escape(account.get("persona_name") or "")}</td>'
+            f'<td>{escape(account["status"])}</td>'
+            f'<td>{escape(account.get("account_notes") or "")}</td>'
+            "</tr>"
+            for account in accounts
+        )
+        + "</tbody></table>"
+        if accounts
+        else '<div class="placeholder">暂无 Social Account</div>'
+    )
+    body = f"""
+      <h1>账号管理</h1>
+      <p class="subtitle">管理 Persona 与真实发布账号绑定。这里只保存生产规划，不执行发布。</p>
+      {message_html(msg, level)}
+      <section class="panel">
+        <h2>创建 Persona</h2>
+        <form method="post" action="/accounts/persona-create-form" class="toolbar">
+          <label>名称<br><input class="field" name="name" placeholder="Sarah ADHD Student" required></label>
+          <label>描述<br><input class="field" name="description" placeholder="College student persona"></label>
+          <label>目标用户<br><input class="field" name="target_audience" placeholder="ADHD college students"></label>
+          <label>语气<br><input class="field" name="tone_style" placeholder="casual"></label>
+          <label>语言风格<br><input class="field" name="language_style" placeholder="american english"></label>
+          <label>视觉风格<br><input class="field" name="visual_style" placeholder="personal storytelling"></label>
+          <label>Persona Profile JSON<br><textarea class="field" name="persona_profile_json">{{"identity":"college student","avoid":["medical claims"]}}</textarea></label>
+          <button class="button" type="submit">创建</button>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>Personas</h2>
+        {personas_html}
+      </section>
+      <section class="panel">
+        <h2>添加 Social Account</h2>
+        <form method="post" action="/accounts/social-create-form" class="toolbar">
+          <label>平台<br><input class="field" name="platform" placeholder="tiktok" required></label>
+          <label>用户名<br><input class="field" name="username" placeholder="sarahfocus" required></label>
+          <label>显示名<br><input class="field" name="display_name" placeholder="Sarah ADHD"></label>
+          <label>绑定Persona<br><select class="field" name="persona_id">{persona_options}</select></label>
+          <label>状态<br><select class="field" name="status"><option value="testing">testing</option><option value="active">active</option><option value="inactive">inactive</option></select></label>
+          <button class="button" type="submit">添加账号</button>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>Social Accounts</h2>
+        {accounts_html}
+      </section>
+    """
+    return render_shell("accounts", "账号管理", body)
+
+
+@app.post("/accounts/persona-create-form")
+async def persona_create_form(request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    try:
+        create_persona(
+            db,
+            {
+                "name": form.get("name", ""),
+                "description": form.get("description", ""),
+                "target_audience": form.get("target_audience", ""),
+                "tone_style": form.get("tone_style", ""),
+                "language_style": form.get("language_style", ""),
+                "visual_style": form.get("visual_style", ""),
+                "persona_profile_json": form.get("persona_profile_json", "{}"),
+                "enabled": True,
+            },
+        )
+        db.commit()
+        return RedirectResponse("/accounts?msg=Persona 已创建", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/accounts?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/accounts/persona-disable-form")
+async def persona_disable_form(request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    try:
+        update_persona(db, form.get("persona_id", ""), {"enabled": False})
+        db.commit()
+        return RedirectResponse("/accounts?msg=Persona 已禁用", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/accounts?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/accounts/social-create-form")
+async def social_create_form(request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    try:
+        create_social_account(db, dict(form))
+        db.commit()
+        return RedirectResponse("/accounts?msg=Social Account 已添加", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/accounts?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/video-projects/create-from-brief-form")
+async def video_project_create_from_brief_form(request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    topic_package_id = form.get("topic_package_id", "")
+    try:
+        project = create_video_project_from_brief(
+            db,
+            form.get("editorial_brief_id", ""),
+            form.get("persona_id", ""),
+            form.get("social_account_id") or None,
+        )
+        db.commit()
+        return RedirectResponse(f"/video-projects/{project.id}?msg=视频项目已创建", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/gpt-director?topic_package_id={topic_package_id}&level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.get("/video-projects", response_class=HTMLResponse)
+def video_projects(msg: str = "", level: str = "ok", status_filter: str = Query(default="", alias="status"), db: Session = Depends(get_db)) -> HTMLResponse:
+    projects = list_video_projects(db, status_filter or None)
+    rows = "".join(
+        "<tr>"
+        f'<td>{escape(project["title"])}</td>'
+        f'<td>{escape(project["status"])}</td>'
+        f'<td>{escape(project.get("persona_name") or "")}</td>'
+        f'<td>{escape(project.get("social_account") or "")}</td>'
+        f'<td>{escape(", ".join(project.get("target_platforms") or []))}</td>'
+        f'<td>{escape(project.get("aspect_ratio") or "")}</td>'
+        f'<td>{escape(str(project.get("duration_target") or ""))}</td>'
+        f'<td>{escape(project.get("priority") or "")}</td>'
+        f'<td><a class="button secondary" href="/video-projects/{escape(project["id"])}">查看</a></td>'
+        "</tr>"
+        for project in projects
+    )
+    table = (
+        "<table><thead><tr><th>标题</th><th>状态</th><th>Persona</th><th>发布账号</th><th>目标平台</th><th>比例</th><th>目标时长</th><th>优先级</th><th>操作</th></tr></thead><tbody>"
+        + rows
+        + "</tbody></table>"
+        if projects
+        else '<div class="placeholder">暂无视频项目。请先从 GPT 编导的 Editorial Brief 创建。</div>'
+    )
+    body = f"""
+      <h1>视频项目</h1>
+      <p class="subtitle">管理 Editorial Brief 之后的视频生产计划。本 Sprint 不执行生成。</p>
+      {message_html(msg, level)}
+      <section class="panel">
+        <form method="get" action="/video-projects" class="toolbar">
+          <label>状态<br><input class="field" name="status" value="{escape(status_filter)}"></label>
+          <button class="button secondary" type="submit">筛选</button>
+        </form>
+      </section>
+      <section class="panel">{table}</section>
+    """
+    return render_shell("video-projects", "视频项目", body)
+
+
+@app.get("/video-projects/{project_id}", response_class=HTMLResponse)
+def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: Session = Depends(get_db)) -> HTMLResponse:
+    from models.production import StudioVideoProject
+
+    row = db.get(StudioVideoProject, project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="video project not found")
+    project = serialize_video_project(db, row, include_detail=True)
+    brief = project.get("editorial_brief") or {}
+    output = brief.get("output") or {}
+    scenes_rows = "".join(
+        "<tr>"
+        f'<td>{escape(str(scene["scene_number"]))}</td>'
+        f'<td>{escape(str(scene.get("duration") or ""))}</td>'
+        f'<td>{escape(scene.get("visual_prompt") or "")}</td>'
+        f'<td>{escape(scene.get("voiceover") or "")}</td>'
+        f'<td>{escape(scene.get("subtitle") or "")}</td>'
+        f'<td>{escape(scene.get("camera_direction") or "")}</td>'
+        f'<td>{escape(scene.get("status") or "")}</td>'
+        "</tr>"
+        for scene in project.get("scenes") or []
+    )
+    scenes_html = (
+        "<table><thead><tr><th>#</th><th>时长</th><th>画面Prompt</th><th>Voiceover</th><th>Subtitle</th><th>镜头</th><th>状态</th></tr></thead><tbody>"
+        + scenes_rows
+        + "</tbody></table>"
+    )
+    generation_html = """
+      <div class="grid">
+        <section class="card"><div class="label">图片生成</div><div class="value">预留</div></section>
+        <section class="card"><div class="label">视频生成</div><div class="value">预留</div></section>
+        <section class="card"><div class="label">配音</div><div class="value">预留</div></section>
+        <section class="card"><div class="label">合成</div><div class="value">预留</div></section>
+      </div>
+    """
+    body = f"""
+      <h1>{escape(project["title"])}</h1>
+      <p class="subtitle"><a href="/video-projects">返回视频项目</a></p>
+      {message_html(msg, level)}
+      <section class="panel">
+        <h2>基础信息</h2>
+        <div class="detail-grid">
+          <div>Topic Package</div><div>{escape(project["topic_package_id"])}</div>
+          <div>Editorial Brief</div><div>{escape(project["editorial_brief_id"])}</div>
+          <div>Persona</div><div>{escape(project.get("persona_name") or "")}</div>
+          <div>Publishing Account</div><div>{escape(project.get("social_account") or "")}</div>
+          <div>状态</div><div>{escape(project["status"])}</div>
+          <div>目标平台</div><div>{escape(", ".join(project.get("target_platforms") or []))}</div>
+          <div>画幅</div><div>{escape(project.get("aspect_ratio") or "")}</div>
+          <div>目标时长</div><div>{escape(str(project.get("duration_target") or ""))}</div>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Script</h2>
+        <h3>Hook</h3>
+        <p>{escape(str(output.get("hook") or ""))}</p>
+        <h3>Script</h3>
+        <p>{escape(str(output.get("script") or ""))}</p>
+      </section>
+      <section class="panel">
+        <h2>Scenes</h2>
+        {scenes_html}
+      </section>
+      <section class="panel">
+        <h2>Generation状态</h2>
+        {generation_html}
+      </section>
+    """
+    return render_shell("video-projects", "视频项目详情", body)
+
+
 def placeholder_page(page_key: str) -> HTMLResponse:
     label = PLACEHOLDER_PAGES[page_key]
     body = f"""
@@ -1753,11 +2105,6 @@ def placeholder_page(page_key: str) -> HTMLResponse:
 @app.get("/inspiration", response_class=HTMLResponse)
 def inspiration() -> HTMLResponse:
     return placeholder_page("inspiration")
-
-
-@app.get("/video-projects", response_class=HTMLResponse)
-def video_projects() -> HTMLResponse:
-    return placeholder_page("video-projects")
 
 
 @app.get("/generation-queue", response_class=HTMLResponse)

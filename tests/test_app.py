@@ -45,7 +45,6 @@ class StudioAppTests(unittest.TestCase):
     def test_placeholder_pages(self):
         paths = [
             "/inspiration",
-            "/video-projects",
             "/generation-queue",
             "/assets",
             "/renders",
@@ -768,6 +767,135 @@ class ContentPoolTests(unittest.TestCase):
         self.assertIn("Version 1", page.text)
         self.assertIn("Version 2", page.text)
         self.assertIn("Planner Reset V2", page.text)
+
+    def test_persona_social_account_video_project_and_persona_prompt(self):
+        persona = self.client.post(
+            "/api/personas",
+            json={
+                "name": "Sarah ADHD Student",
+                "description": "College student persona",
+                "target_audience": "ADHD college students",
+                "persona_profile": {
+                    "identity": "college student",
+                    "age_range": "18-25",
+                    "tone": "casual",
+                    "language": "american english",
+                    "style": "personal storytelling",
+                    "avoid": ["medical claims"],
+                },
+                "tone_style": "casual",
+                "language_style": "american english",
+                "visual_style": "personal storytelling",
+                "voice_style": "warm peer voice",
+                "content_rules": {"avoid": ["medical claims"]},
+            },
+        )
+        self.assertEqual(persona.status_code, 200)
+        persona_id = persona.json()["id"]
+
+        updated_persona = self.client.put(
+            f"/api/personas/{persona_id}",
+            json={"description": "Updated college student persona"},
+        )
+        self.assertEqual(updated_persona.status_code, 200)
+        self.assertEqual(updated_persona.json()["description"], "Updated college student persona")
+
+        disabled = self.client.post(
+            "/api/personas",
+            json={"name": "Disabled Persona", "enabled": True},
+        ).json()
+        disabled_update = self.client.put(f"/api/personas/{disabled['id']}", json={"enabled": False})
+        self.assertEqual(disabled_update.status_code, 200)
+        self.assertFalse(disabled_update.json()["enabled"])
+        coach = self.client.post(
+            "/api/personas",
+            json={
+                "name": "Productivity Coach",
+                "target_audience": "busy professionals",
+                "persona_profile": {"identity": "productivity coach", "tone": "direct", "avoid": ["diagnosis"]},
+                "tone_style": "direct",
+            },
+        ).json()
+
+        account = self.client.post(
+            "/api/social-accounts",
+            json={
+                "platform": "tiktok",
+                "username": "sarahfocus",
+                "display_name": "Sarah ADHD",
+                "persona_id": persona_id,
+                "status": "active",
+            },
+        )
+        self.assertEqual(account.status_code, 200)
+        account_id = account.json()["id"]
+
+        filtered_accounts = self.client.get("/api/social-accounts", params={"persona_id": persona_id})
+        self.assertEqual(filtered_accounts.status_code, 200)
+        self.assertEqual(len(filtered_accounts.json()["items"]), 1)
+        self.assertEqual(filtered_accounts.json()["items"][0]["id"], account_id)
+
+        item_id = self.create_pushed_item("video-project-1", "ADHD students need simpler study routines", 90, 18, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "ADHD student study routine", "content_item_ids": [item_id]},
+        ).json()
+        self.create_topic_intelligence_analysis(package["id"])
+        self.create_prompt("editorial")
+
+        prompt = self.client.get(
+            f"/api/topic-packages/{package['id']}/editorial-prompt",
+            params={"persona_id": persona_id},
+        )
+        self.assertEqual(prompt.status_code, 200)
+        self.assertIn("Create content for this persona", prompt.json()["prompt"])
+        self.assertIn("college student", prompt.json()["prompt"])
+        self.assertIn("medical claims", prompt.json()["prompt"])
+        coach_prompt = self.client.get(
+            f"/api/topic-packages/{package['id']}/editorial-prompt",
+            params={"persona_id": coach["id"]},
+        )
+        self.assertEqual(coach_prompt.status_code, 200)
+        self.assertIn("productivity coach", coach_prompt.json()["prompt"])
+        self.assertNotEqual(prompt.json()["prompt"], coach_prompt.json()["prompt"])
+
+        output = self.valid_editorial_output("Study Routine Reset")
+        brief = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": output,
+            },
+        )
+        self.assertEqual(brief.status_code, 200)
+
+        project = self.client.post(
+            "/api/video-projects/from-brief",
+            json={
+                "editorial_brief_id": brief.json()["id"],
+                "persona_id": persona_id,
+                "social_account_id": account_id,
+            },
+        )
+        self.assertEqual(project.status_code, 200)
+        payload = project.json()
+        self.assertEqual(payload["persona_id"], persona_id)
+        self.assertEqual(payload["social_account_id"], account_id)
+        self.assertEqual(payload["target_platforms"], ["tiktok"])
+        self.assertEqual(len(payload["scenes"]), 1)
+        self.assertEqual(payload["scenes"][0]["visual_prompt"], "A cluttered planner on a desk")
+
+        list_page = self.client.get("/video-projects")
+        detail_page = self.client.get(f"/video-projects/{payload['id']}")
+        accounts_page = self.client.get("/accounts")
+        self.assertEqual(list_page.status_code, 200)
+        self.assertIn("Study Routine Reset", list_page.text)
+        self.assertEqual(detail_page.status_code, 200)
+        self.assertIn("Generation状态", detail_page.text)
+        self.assertEqual(accounts_page.status_code, 200)
+        self.assertIn("Sarah ADHD Student", accounts_page.text)
 
 
 if __name__ == "__main__":
