@@ -454,7 +454,51 @@ Open:
 http://127.0.0.1:8502/video-projects
 ```
 
-Video Projects initialize scenes from the Editorial Brief `scenes` JSON. Generation Tasks are table scaffolds only in Sprint 08; they are not executed.
+Video Projects initialize scenes from the Editorial Brief `scenes` JSON. Sprint 09 adds a Generation Queue planning layer. It creates pipeline and task records only; it does not call ComfyUI, FLUX, Wan, TTS, FFmpeg, Kling, Runway, Veo, or any other generation provider.
+
+### Persona Mode And General Mode
+
+Video Projects support two creation modes:
+
+- `general`: no Persona or Social Account is required. Use this for generic production planning.
+- `persona`: requires a Persona and may bind a Social Account filtered by that Persona.
+
+The migration seeds a system Persona named `Default Creator`, but general mode keeps `persona_id` empty by design.
+
+### Create A Generation Plan
+
+From the Video Project detail page, click `创建生成计划`.
+
+API:
+
+```bash
+curl -X POST http://127.0.0.1:8502/api/video-projects/{video_project_id}/generation-plan
+```
+
+The planner creates:
+
+- per-scene `image_generation`
+- per-scene `video_generation`
+- whole-project `voice_generation`
+- whole-project `subtitle_generation`
+- whole-project `composition`
+
+Each task stores `context_json` with:
+
+- `topic_package_id`
+- `editorial_brief_id`
+- `video_project_id`
+- `persona_id`
+- `social_account_id`
+- `scene_id`
+
+Open:
+
+```text
+http://127.0.0.1:8502/generation-queue
+```
+
+Provider adapters live under `services/generation/providers/`. Sprint 09 only registers placeholder adapters and health checks.
 
 ## Idempotency
 

@@ -45,7 +45,6 @@ class StudioAppTests(unittest.TestCase):
     def test_placeholder_pages(self):
         paths = [
             "/inspiration",
-            "/generation-queue",
             "/assets",
             "/renders",
             "/settings",
@@ -81,6 +80,13 @@ class StudioAppTests(unittest.TestCase):
         self.assertIn("Brainy（小脑瓜）", content)
         self.assertIn("TiredBrainClub", content)
         self.assertIn("medical claims", content)
+
+    def test_default_creator_migration_exists(self):
+        with open("migrations/versions/0009_generation_queue_framework.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Default Creator", content)
+        self.assertIn("general content creator", content)
+        self.assertIn("studio_generation_pipelines", content)
 
 
 class ContentPoolTests(unittest.TestCase):
@@ -903,6 +909,77 @@ class ContentPoolTests(unittest.TestCase):
         self.assertIn("Generation状态", detail_page.text)
         self.assertEqual(accounts_page.status_code, 200)
         self.assertIn("Sarah ADHD Student", accounts_page.text)
+
+    def test_general_video_project_generation_plan_and_provider_registry(self):
+        item_id = self.create_pushed_item("generation-1", "ADHD students need visual study resets", 91, 22, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "Visual study reset", "content_item_ids": [item_id]},
+        ).json()
+        self.create_topic_intelligence_analysis(package["id"])
+        self.create_prompt("editorial")
+        prompt = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        self.assertEqual(prompt.status_code, 200)
+        brief = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": self.valid_editorial_output("Visual Study Reset"),
+            },
+        )
+        self.assertEqual(brief.status_code, 200)
+
+        project = self.client.post(
+            "/api/video-projects/from-brief",
+            json={
+                "editorial_brief_id": brief.json()["id"],
+                "creation_mode": "general",
+            },
+        )
+        self.assertEqual(project.status_code, 200)
+        payload = project.json()
+        self.assertEqual(payload["creation_mode"], "general")
+        self.assertIsNone(payload["persona_id"])
+        self.assertIsNone(payload["social_account_id"])
+
+        plan = self.client.post(f"/api/video-projects/{payload['id']}/generation-plan")
+        self.assertEqual(plan.status_code, 200)
+        plan_payload = plan.json()
+        self.assertEqual(plan_payload["pipeline"]["status"], "queued")
+        self.assertEqual(plan_payload["pipeline"]["total_tasks"], 5)
+        task_types = [task["task_type"] for task in plan_payload["tasks"]]
+        self.assertEqual(
+            task_types,
+            ["image_generation", "video_generation", "voice_generation", "subtitle_generation", "composition"],
+        )
+        self.assertEqual(plan_payload["tasks"][0]["context"]["video_project_id"], payload["id"])
+        self.assertIsNone(plan_payload["tasks"][0]["context"]["persona_id"])
+        self.assertIsNotNone(plan_payload["tasks"][1]["depends_on_task_id"])
+
+        queue_api = self.client.get("/api/generation-tasks", params={"status": "queued"})
+        self.assertEqual(queue_api.status_code, 200)
+        self.assertEqual(len(queue_api.json()["items"]), 5)
+        queue_page = self.client.get("/generation-queue")
+        detail_page = self.client.get(f"/video-projects/{payload['id']}")
+        self.assertEqual(queue_page.status_code, 200)
+        self.assertIn("Generation Queue", queue_page.text)
+        self.assertIn("image_generation", queue_page.text)
+        self.assertEqual(detail_page.status_code, 200)
+        self.assertIn("Video Generation Pipeline", detail_page.text)
+        self.assertIn("composition", detail_page.text)
+
+        providers = self.client.get("/api/generation/providers")
+        self.assertEqual(providers.status_code, 200)
+        provider_names = [row["provider"] for row in providers.json()["items"]]
+        self.assertIn("comfyui", provider_names)
+        self.assertIn("veo", provider_names)
+        health = self.client.get("/api/generation/providers/wan/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(health.json()["status"], "not_configured")
+        missing = self.client.get("/api/generation/providers/unknown/health")
+        self.assertEqual(missing.status_code, 404)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from models.ai import StudioEditorialBrief
 from models.production import (
+    StudioGenerationPipeline,
     StudioGenerationTask,
     StudioPersona,
     StudioSocialAccount,
@@ -22,6 +23,9 @@ PERSONA_STATUSES = {True, False}
 SOCIAL_ACCOUNT_STATUSES = {"active", "inactive", "testing"}
 VIDEO_PROJECT_STATUSES = {"draft", "planning", "ready_for_generation", "generating", "reviewing", "completed", "archived"}
 VIDEO_SCENE_STATUSES = {"draft", "ready", "generating", "completed", "failed"}
+CREATION_MODES = {"general", "persona"}
+GENERATION_TASK_STATUSES = {"pending", "queued", "running", "paused", "completed", "failed", "cancelled"}
+PIPELINE_STATUSES = {"draft", "planning", "queued", "running", "completed", "failed"}
 GENERATION_TASK_TYPES = {
     "image_generation",
     "video_generation",
@@ -95,8 +99,18 @@ def serialize_generation_task(row: StudioGenerationTask) -> dict[str, Any]:
         "video_project_id": row.video_project_id,
         "scene_id": row.scene_id,
         "task_type": row.task_type,
-        "provider": row.provider,
+        "provider": row.provider_name or row.provider,
+        "provider_name": row.provider_name or row.provider,
+        "provider_task_id": row.provider_task_id,
         "status": row.status,
+        "priority": row.priority,
+        "scheduled_at": row.scheduled_at.isoformat() if row.scheduled_at else None,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "retry_count": row.retry_count,
+        "max_retry": row.max_retry,
+        "depends_on_task_id": row.depends_on_task_id,
+        "context": parse_json(row.context_json, {}),
         "input": parse_json(row.input_json, {}),
         "output": parse_json(row.output_json, {}),
         "error_message": row.error_message,
@@ -105,8 +119,21 @@ def serialize_generation_task(row: StudioGenerationTask) -> dict[str, Any]:
     }
 
 
+def serialize_generation_pipeline(row: StudioGenerationPipeline) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "video_project_id": row.video_project_id,
+        "status": row.status,
+        "current_stage": row.current_stage,
+        "total_tasks": row.total_tasks,
+        "completed_tasks": row.completed_tasks,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
 def serialize_video_project(db: Session, row: StudioVideoProject, include_detail: bool = False) -> dict[str, Any]:
-    persona = db.get(StudioPersona, row.persona_id)
+    persona = db.get(StudioPersona, row.persona_id) if row.persona_id else None
     account = db.get(StudioSocialAccount, row.social_account_id) if row.social_account_id else None
     payload = {
         "id": row.id,
@@ -116,6 +143,7 @@ def serialize_video_project(db: Session, row: StudioVideoProject, include_detail
         "persona_name": persona.name if persona else None,
         "social_account_id": row.social_account_id,
         "social_account": f"{account.platform} @{account.username}" if account else None,
+        "creation_mode": row.creation_mode,
         "title": row.title,
         "description": row.description,
         "status": row.status,
@@ -137,9 +165,15 @@ def serialize_video_project(db: Session, row: StudioVideoProject, include_detail
             .where(StudioGenerationTask.video_project_id == row.id)
             .order_by(StudioGenerationTask.created_at.desc())
         ).all()
+        pipelines = db.scalars(
+            select(StudioGenerationPipeline)
+            .where(StudioGenerationPipeline.video_project_id == row.id)
+            .order_by(StudioGenerationPipeline.created_at.desc())
+        ).all()
         brief = db.get(StudioEditorialBrief, row.editorial_brief_id)
         payload["scenes"] = [serialize_video_scene(scene) for scene in scenes]
         payload["generation_tasks"] = [serialize_generation_task(task) for task in tasks]
+        payload["generation_pipelines"] = [serialize_generation_pipeline(pipeline) for pipeline in pipelines]
         payload["editorial_brief"] = serialize_editorial_brief(brief) if brief else None
         payload["persona"] = serialize_persona(persona) if persona else None
         payload["social_account_detail"] = serialize_social_account(account, persona) if account else None
@@ -261,19 +295,35 @@ def list_video_projects(db: Session, status: Optional[str] = None) -> list[dict[
 def create_video_project_from_brief(
     db: Session,
     editorial_brief_id: str,
-    persona_id: str,
+    persona_id: Optional[str] = None,
     social_account_id: Optional[str] = None,
     priority: str = "normal",
+    creation_mode: str = "persona",
 ) -> StudioVideoProject:
     brief = db.get(StudioEditorialBrief, editorial_brief_id)
     if not brief:
         raise HTTPException(status_code=404, detail="editorial brief not found")
-    persona = db.get(StudioPersona, persona_id)
-    if not persona or not persona.enabled:
-        raise HTTPException(status_code=422, detail="enabled persona is required")
+    creation_mode = (creation_mode or "persona").strip().lower()
+    if creation_mode not in CREATION_MODES:
+        raise HTTPException(status_code=422, detail="invalid creation mode")
+    persona_id = str(persona_id or "") or None
+    social_account_id = str(social_account_id or "") or None
+    persona = None
+    if creation_mode == "persona":
+        if not persona_id:
+            raise HTTPException(status_code=422, detail="enabled persona is required")
+        persona = db.get(StudioPersona, persona_id)
+        if not persona or not persona.enabled:
+            raise HTTPException(status_code=422, detail="enabled persona is required")
+    elif persona_id:
+        persona = db.get(StudioPersona, persona_id)
+        if not persona:
+            raise HTTPException(status_code=404, detail="persona not found")
     account = db.get(StudioSocialAccount, social_account_id) if social_account_id else None
     if social_account_id and not account:
         raise HTTPException(status_code=404, detail="social account not found")
+    if creation_mode == "general" and account:
+        raise HTTPException(status_code=422, detail="general mode does not bind social account")
     if account and account.persona_id != persona_id:
         raise HTTPException(status_code=422, detail="social account must belong to selected persona")
     output = parse_json(brief.output_json, {}) or parse_json(brief.input_json, {})
@@ -283,8 +333,9 @@ def create_video_project_from_brief(
     project = StudioVideoProject(
         topic_package_id=brief.topic_package_id,
         editorial_brief_id=brief.id,
-        persona_id=persona.id,
+        persona_id=persona.id if persona else None,
         social_account_id=account.id if account else None,
+        creation_mode=creation_mode,
         title=str(output.get("title") or "Untitled Video Project"),
         description=str(output.get("hook") or output.get("script") or ""),
         status="draft",

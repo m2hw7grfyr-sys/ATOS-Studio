@@ -447,15 +447,112 @@ TikTok `@TiredBrainClub`
 
 ## 9. 视频项目管理
 
+### Persona模式与通用模式
+
+创建视频项目时有两种模式：
+
+- 通用模式：不选择 Persona，也不绑定发布账号。适合先做普通脚本规划，后面再决定账号。
+- Persona模式：选择一个 Persona，并可选择该 Persona 绑定的发布账号。适合固定账号人格、语气和视觉风格的内容。
+
+系统自带 `Default Creator`，用于通用创作参考。但通用模式不会强制绑定任何 Persona。
+
+建议：
+
+- 账号风格已经明确时，用 Persona模式。
+- 只是测试选题、脚本或分镜时，用通用模式。
+
+### 什么是Generation Pipeline
+
+Pipeline 是一次完整视频生产计划。
+
+一个视频项目可以创建一个或多个 Pipeline。
+
+Pipeline 会拆成多个 Task，例如：
+
+- 图片生成
+- 视频生成
+- 配音
+- 字幕
+- 合成
+
+当前版本只创建计划，不自动生成文件。
+
+### 什么是Generation Task
+
+Task 是 Pipeline 里的具体步骤。
+
+常见状态：
+
+- pending：已创建但未排队
+- queued：已进入队列
+- running：执行中
+- paused：暂停
+- completed：完成
+- failed：失败
+- cancelled：取消
+
+当前 Sprint 的 Task 只是生产管理对象，不会连接 ComfyUI、Wan、FLUX、TTS、FFmpeg 或任何外部视频服务。
+
 ### 从Editorial Brief创建项目
 
 1. 打开 `GPT编导`。
 2. 选择主题包和 Persona。
 3. 保存一个合法的 Editorial Brief JSON。
-4. 在历史版本列表中选择发布账号。
-5. 点击 `创建视频项目`。
+4. 在历史版本列表中选择 `通用模式` 或 `Persona模式`。
+5. Persona模式下选择发布账号。
+6. 点击 `创建视频项目`。
 
 系统会创建 Video Project，并从 Brief 的 `scenes` 初始化分镜。
+
+### 创建生成计划
+
+1. 打开 `视频项目`。
+2. 进入某个项目详情。
+3. 点击 `创建生成计划`。
+4. 打开 `生成队列` 查看任务。
+
+生成计划会自动拆分：
+
+- 每个分镜一条图片生成任务。
+- 每个分镜一条视频生成任务。
+- 整体配音任务。
+- 整体字幕任务。
+- 最终合成任务。
+
+### 查看生成队列
+
+打开左侧菜单 `生成队列`。
+
+可以查看：
+
+- Task ID
+- 项目
+- 类型
+- Provider
+- 状态
+- 创建时间
+- 更新时间
+
+也可以按状态、类型和 Provider 筛选。
+
+### 为什么当前没有自动生成
+
+Sprint 09 的目标是建立生产队列和 Provider Adapter 架构。
+
+它只负责：
+
+- 拆分任务
+- 保存任务上下文
+- 展示队列状态
+- 为后续模型接入预留接口
+
+它不会：
+
+- 调用视频模型
+- 调用 TTS
+- 调用 FFmpeg
+- 自动生成图片或视频
+- 自动发布
 
 ### 选择Persona
 
@@ -488,14 +585,14 @@ Persona 会影响 GPT Prompt。
 - Scenes
 - Generation 状态
 
-当前 Generation 状态只是占位：
+当前 Generation 状态会显示 Pipeline 和 Task：
 
 - 图片生成
 - 视频生成
 - 配音
 - 合成
 
-Sprint 08 不会真正连接视频模型。
+Sprint 09 不会真正连接视频模型。
 
 ## 10. 常见问题
 

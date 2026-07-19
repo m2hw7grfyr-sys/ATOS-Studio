@@ -3,6 +3,7 @@
 from models.content_item import StudioContentItem
 from models.ai import StudioAIAnalysis, StudioAIJob, StudioEditorialBrief, StudioPromptTemplate
 from models.production import (
+    StudioGenerationPipeline,
     StudioGenerationTask,
     StudioPersona,
     StudioSocialAccount,
@@ -17,6 +18,7 @@ __all__ = [
     "StudioAuditEvent",
     "StudioContentItem",
     "StudioEditorialBrief",
+    "StudioGenerationPipeline",
     "StudioGenerationTask",
     "StudioPersona",
     "StudioPromptTemplate",

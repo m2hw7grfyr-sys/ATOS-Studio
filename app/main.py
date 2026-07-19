@@ -15,7 +15,7 @@ from config.settings import get_settings
 from database import get_db
 from models.content_item import StudioContentItem
 from models.ai import StudioEditorialBrief
-from models.production import StudioPersona, StudioSocialAccount
+from models.production import StudioPersona, StudioSocialAccount, StudioVideoProject
 from models.topic_package import StudioTopicPackage
 from models.schemas import (
     ContentItemStatusBatchRequest,
@@ -60,6 +60,16 @@ from services.gpt_prompt_builder import (
     save_editorial_output,
     serialize_editorial_brief,
     update_editorial_brief_status,
+)
+from services.generation.provider_registry import (
+    get_generation_provider,
+    list_generation_providers,
+    provider_health,
+)
+from services.generation_planner import (
+    create_generation_plan,
+    list_generation_pipelines,
+    list_generation_tasks,
 )
 from services.topic_intelligence_service import TOPIC_INTELLIGENCE_JOB_TYPE
 from services.topic_packages import (
@@ -1646,7 +1656,7 @@ def gpt_director_page(
             '<td><div class="actions">'
             f'<form method="post" action="/gpt-director/brief-status-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="persona_id" value="{escape(selected_persona_id)}"><input type="hidden" name="brief_id" value="{escape(row["id"])}"><input type="hidden" name="status" value="reviewing"><button class="button secondary" type="submit">进入审核</button></form>'
             f'<form method="post" action="/gpt-director/brief-status-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="persona_id" value="{escape(selected_persona_id)}"><input type="hidden" name="brief_id" value="{escape(row["id"])}"><input type="hidden" name="status" value="approved"><button class="button" type="submit">批准</button></form>'
-            f'<form method="post" action="/video-projects/create-from-brief-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="editorial_brief_id" value="{escape(row["id"])}"><input type="hidden" name="persona_id" value="{escape(selected_persona_id)}"><select class="field" name="social_account_id">{account_options}</select><button class="button secondary" type="submit">创建视频项目</button></form>'
+            f'<form method="post" action="/video-projects/create-from-brief-form"><input type="hidden" name="topic_package_id" value="{escape(selected_id)}"><input type="hidden" name="editorial_brief_id" value="{escape(row["id"])}"><input type="hidden" name="persona_id" value="{escape(selected_persona_id)}"><select class="field" name="creation_mode"><option value="general">通用模式</option><option value="persona" selected>Persona模式</option></select><select class="field" name="social_account_id">{account_options}</select><button class="button secondary" type="submit">创建视频项目</button></form>'
             "</div></td>"
             "</tr>"
             for row in saved_briefs
@@ -1822,12 +1832,49 @@ def create_video_project_from_brief_api(payload: dict = Body(...), db: Session =
     row = create_video_project_from_brief(
         db,
         str(payload.get("editorial_brief_id") or ""),
-        str(payload.get("persona_id") or ""),
+        str(payload.get("persona_id") or "") or None,
         str(payload.get("social_account_id") or "") or None,
         str(payload.get("priority") or "normal"),
+        str(payload.get("creation_mode") or ("persona" if payload.get("persona_id") else "general")),
     )
     db.commit()
     return serialize_video_project(db, row, include_detail=True)
+
+
+@app.post("/api/video-projects/{project_id}/generation-plan")
+def create_generation_plan_api(project_id: str, db: Session = Depends(get_db)) -> dict:
+    payload = create_generation_plan(db, project_id)
+    db.commit()
+    return payload
+
+
+@app.get("/api/generation-tasks")
+def generation_tasks_api(
+    status_filter: str = Query(default="", alias="status"),
+    task_type: str = "",
+    provider: str = "",
+    db: Session = Depends(get_db),
+) -> dict:
+    return {"items": list_generation_tasks(db, status_filter or None, task_type or None, provider or None)}
+
+
+@app.get("/api/generation-pipelines")
+def generation_pipelines_api(video_project_id: str = "", db: Session = Depends(get_db)) -> dict:
+    return {"items": list_generation_pipelines(db, video_project_id or None)}
+
+
+@app.get("/api/generation/providers")
+def generation_providers_api() -> dict:
+    return {"items": list_generation_providers()}
+
+
+@app.get("/api/generation/providers/{provider_name}/health")
+def generation_provider_health_api(provider_name: str) -> dict:
+    try:
+        get_generation_provider(provider_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return provider_health(provider_name)
 
 
 @app.get("/accounts", response_class=HTMLResponse)
@@ -1973,8 +2020,10 @@ async def video_project_create_from_brief_form(request: Request, db: Session = D
         project = create_video_project_from_brief(
             db,
             form.get("editorial_brief_id", ""),
-            form.get("persona_id", ""),
+            form.get("persona_id") or None,
             form.get("social_account_id") or None,
+            "normal",
+            form.get("creation_mode", "persona"),
         )
         db.commit()
         return RedirectResponse(f"/video-projects/{project.id}?msg=视频项目已创建", status_code=303)
@@ -1989,6 +2038,7 @@ def video_projects(msg: str = "", level: str = "ok", status_filter: str = Query(
     rows = "".join(
         "<tr>"
         f'<td>{escape(project["title"])}</td>'
+        f'<td>{escape(project.get("creation_mode") or "")}</td>'
         f'<td>{escape(project["status"])}</td>'
         f'<td>{escape(project.get("persona_name") or "")}</td>'
         f'<td>{escape(project.get("social_account") or "")}</td>'
@@ -2001,7 +2051,7 @@ def video_projects(msg: str = "", level: str = "ok", status_filter: str = Query(
         for project in projects
     )
     table = (
-        "<table><thead><tr><th>标题</th><th>状态</th><th>Persona</th><th>发布账号</th><th>目标平台</th><th>比例</th><th>目标时长</th><th>优先级</th><th>操作</th></tr></thead><tbody>"
+        "<table><thead><tr><th>标题</th><th>创作模式</th><th>状态</th><th>Persona</th><th>发布账号</th><th>目标平台</th><th>比例</th><th>目标时长</th><th>优先级</th><th>操作</th></tr></thead><tbody>"
         + rows
         + "</tbody></table>"
         if projects
@@ -2024,8 +2074,6 @@ def video_projects(msg: str = "", level: str = "ok", status_filter: str = Query(
 
 @app.get("/video-projects/{project_id}", response_class=HTMLResponse)
 def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: Session = Depends(get_db)) -> HTMLResponse:
-    from models.production import StudioVideoProject
-
     row = db.get(StudioVideoProject, project_id)
     if not row:
         raise HTTPException(status_code=404, detail="video project not found")
@@ -2049,14 +2097,43 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
         + scenes_rows
         + "</tbody></table>"
     )
-    generation_html = """
-      <div class="grid">
-        <section class="card"><div class="label">图片生成</div><div class="value">预留</div></section>
-        <section class="card"><div class="label">视频生成</div><div class="value">预留</div></section>
-        <section class="card"><div class="label">配音</div><div class="value">预留</div></section>
-        <section class="card"><div class="label">合成</div><div class="value">预留</div></section>
-      </div>
-    """
+    task_types = {task.get("task_type") for task in project.get("generation_tasks") or []}
+    pipeline = (project.get("generation_pipelines") or [None])[0] or {}
+    stage_cards = [
+        ("Planning", bool(pipeline)),
+        ("Image Tasks Created", "image_generation" in task_types),
+        ("Video Generation", "video_generation" in task_types),
+        ("Voice", "voice_generation" in task_types),
+        ("Composition", "composition" in task_types),
+    ]
+    generation_html = (
+        '<div class="grid">'
+        + "".join(
+            '<section class="card">'
+            f'<div class="label">{escape(label)}</div>'
+            f'<div class="value {"status-ok" if done else "status-warn"}">{"✓" if done else "○"}</div>'
+            "</section>"
+            for label, done in stage_cards
+        )
+        + "</div>"
+        + (
+            "<table><thead><tr><th>Task ID</th><th>类型</th><th>Provider</th><th>状态</th><th>依赖</th><th>Context</th></tr></thead><tbody>"
+            + "".join(
+                "<tr>"
+                f'<td>{escape(task["id"])}</td>'
+                f'<td>{escape(task["task_type"])}</td>'
+                f'<td>{escape(task.get("provider_name") or task.get("provider") or "")}</td>'
+                f'<td>{escape(task["status"])}</td>'
+                f'<td>{escape(task.get("depends_on_task_id") or "")}</td>'
+                f'<td><details><summary>查看</summary><pre>{escape(json.dumps(task.get("context") or {}, ensure_ascii=False, indent=2))}</pre></details></td>'
+                "</tr>"
+                for task in project.get("generation_tasks") or []
+            )
+            + "</tbody></table>"
+            if project.get("generation_tasks")
+            else '<div class="placeholder">尚未创建生成计划。当前版本只生成队列，不执行生成。</div>'
+        )
+    )
     body = f"""
       <h1>{escape(project["title"])}</h1>
       <p class="subtitle"><a href="/video-projects">返回视频项目</a></p>
@@ -2066,6 +2143,7 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
         <div class="detail-grid">
           <div>Topic Package</div><div>{escape(project["topic_package_id"])}</div>
           <div>Editorial Brief</div><div>{escape(project["editorial_brief_id"])}</div>
+          <div>创作模式</div><div>{escape(project.get("creation_mode") or "")}</div>
           <div>Persona</div><div>{escape(project.get("persona_name") or "")}</div>
           <div>Publishing Account</div><div>{escape(project.get("social_account") or "")}</div>
           <div>状态</div><div>{escape(project["status"])}</div>
@@ -2086,11 +2164,27 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
         {scenes_html}
       </section>
       <section class="panel">
-        <h2>Generation状态</h2>
+        <h2>Video Generation Pipeline</h2>
+        <p class="subtitle">Generation状态：当前只创建计划和队列任务，不执行真实生成。</p>
+        <form method="post" action="/video-projects/{escape(project["id"])}/generation-plan-form" class="toolbar">
+          <button class="button" type="submit">创建生成计划</button>
+          <a class="button secondary" href="/generation-queue">查看生成队列</a>
+        </form>
         {generation_html}
       </section>
     """
     return render_shell("video-projects", "视频项目详情", body)
+
+
+@app.post("/video-projects/{project_id}/generation-plan-form")
+async def video_project_generation_plan_form(project_id: str, db: Session = Depends(get_db)):
+    try:
+        create_generation_plan(db, project_id)
+        db.commit()
+        return RedirectResponse(f"/video-projects/{project_id}?msg=生成计划已创建", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
 
 
 def placeholder_page(page_key: str) -> HTMLResponse:
@@ -2108,8 +2202,63 @@ def inspiration() -> HTMLResponse:
 
 
 @app.get("/generation-queue", response_class=HTMLResponse)
-def generation_queue() -> HTMLResponse:
-    return placeholder_page("generation-queue")
+def generation_queue(
+    status_filter: str = Query(default="", alias="status"),
+    task_type: str = "",
+    provider: str = "",
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    tasks = list_generation_tasks(db, status_filter or None, task_type or None, provider or None)
+    providers = list_generation_providers()
+    rows = []
+    for task in tasks:
+        project = db.get(StudioVideoProject, task["video_project_id"])
+        rows.append(
+            "<tr>"
+            f'<td>{escape(task["id"])}</td>'
+            f'<td>{escape(project.title if project else task["video_project_id"])}</td>'
+            f'<td>{escape(task["task_type"])}</td>'
+            f'<td>{escape(task.get("provider_name") or task.get("provider") or "")}</td>'
+            f'<td>{escape(task["status"])}</td>'
+            f'<td>{escape(task.get("created_at") or "")}</td>'
+            f'<td>{escape(task.get("updated_at") or "")}</td>'
+            "</tr>"
+        )
+    table = (
+        "<table><thead><tr><th>Task ID</th><th>项目</th><th>类型</th><th>Provider</th><th>状态</th><th>创建时间</th><th>更新时间</th></tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table>"
+        if tasks
+        else '<div class="placeholder">暂无生成任务。请从视频项目详情点击“创建生成计划”。</div>'
+    )
+    provider_cards = "".join(
+        '<section class="card">'
+        f'<div class="label">{escape(row["provider"])}</div>'
+        f'<div class="value {"status-ok" if row.get("available") else "status-warn"}">{escape(row["status"])}</div>'
+        "</section>"
+        for row in providers
+    )
+    body = f"""
+      <h1>生成队列</h1>
+      <p class="subtitle">Generation Queue：只负责拆分和排队。当前 Sprint 不连接视频模型，不执行生成。</p>
+      <section class="panel">
+        <form method="get" action="/generation-queue" class="toolbar">
+          <label>状态<br><input class="field" name="status" value="{escape(status_filter)}" placeholder="queued"></label>
+          <label>类型<br><input class="field" name="task_type" value="{escape(task_type)}" placeholder="image_generation"></label>
+          <label>Provider<br><input class="field" name="provider" value="{escape(provider)}" placeholder="mock"></label>
+          <button class="button secondary" type="submit">筛选</button>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>Provider Registry</h2>
+        <div class="grid">{provider_cards}</div>
+      </section>
+      <section class="panel">
+        <h2>任务列表</h2>
+        {table}
+      </section>
+    """
+    return render_shell("generation-queue", "生成队列", body)
 
 
 @app.get("/assets", response_class=HTMLResponse)
