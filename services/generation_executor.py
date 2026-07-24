@@ -237,7 +237,7 @@ def create_scene_image_task(db: Session, scene_id: str, provider_name: str = "co
     if not project:
         raise HTTPException(status_code=404, detail="video project not found")
     context = generation_context(project, scene)
-    context["visual_prompt"] = scene.visual_prompt
+    context["visual_prompt"] = scene.image_prompt or scene.visual_prompt or scene.visual_description
     if workflow_id:
         context["workflow_id"] = workflow_id
     task = StudioGenerationTask(

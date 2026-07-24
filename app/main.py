@@ -86,6 +86,15 @@ from services.generation_executor import (
     update_model_capability,
     update_workflow,
 )
+from services.creator_workspace import (
+    copy_scene,
+    create_scene,
+    delete_scene,
+    move_scene,
+    scene_plain_text,
+    update_editorial_workspace,
+    update_scene,
+)
 from services.topic_intelligence_service import TOPIC_INTELLIGENCE_JOB_TYPE
 from services.topic_packages import (
     add_items_to_topic_package,
@@ -216,6 +225,7 @@ def render_shell(active_key: str, title: str, body: str) -> HTMLResponse:
       .button {{ min-height: 38px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; padding: 8px 12px; cursor: pointer; }}
       .button.secondary {{ background: #475569; }}
       .button.danger {{ background: #b42318; }}
+      .button.mini {{ min-height: 30px; padding: 5px 9px; font-size: 12px; }}
       table {{ width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }}
       th, td {{ padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 14px; }}
       th {{ color: var(--muted); font-weight: 650; background: #f1f4f8; }}
@@ -223,6 +233,13 @@ def render_shell(active_key: str, title: str, body: str) -> HTMLResponse:
       .notice {{ border-radius: 6px; padding: 10px 12px; margin: 12px 0; background: #eef7f1; color: var(--good); }}
       .notice.warn {{ background: #fff7e6; color: var(--warn); }}
       .detail-grid {{ display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 10px 14px; }}
+      .form-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }}
+      textarea.field {{ width: 100%; min-height: 96px; font-family: inherit; }}
+      .field.full {{ width: 100%; }}
+      .scene-card {{ border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 14px 0; background: #fbfcfe; }}
+      .scene-header {{ display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }}
+      .copy-source {{ position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }}
+      details.summary-box {{ background: #fbfcfe; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }}
       pre {{ overflow: auto; background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 8px; }}
       code {{ background: #eef2f7; padding: 2px 5px; border-radius: 4px; }}
       @media (max-width: 760px) {{
@@ -240,6 +257,23 @@ def render_shell(active_key: str, title: str, body: str) -> HTMLResponse:
       </aside>
       <main>{body}</main>
     </div>
+    <script>
+      async function copyTextById(id, button) {{
+        const node = document.getElementById(id);
+        if (!node) return;
+        const text = node.value !== undefined ? node.value : node.textContent;
+        try {{
+          await navigator.clipboard.writeText(text || "");
+          const oldText = button ? button.textContent : "";
+          if (button) button.textContent = "复制成功";
+          setTimeout(function () {{
+            if (button) button.textContent = oldText || "复制";
+          }}, 1200);
+        }} catch (error) {{
+          alert("复制失败，请手动选择文本复制。");
+        }}
+      }}
+    </script>
   </body>
 </html>"""
     return HTMLResponse(html)
@@ -2158,47 +2192,179 @@ def video_projects(msg: str = "", level: str = "ok", status_filter: str = Query(
     return render_shell("video-projects", "视频项目", body)
 
 
+def latest_topic_intelligence_result(db: Session, topic_package_id: str) -> dict:
+    for analysis in topic_ai_analyses(db, topic_package_id):
+        if analysis.get("analysis_type") == "topic_intelligence":
+            return analysis.get("result") or {}
+    return {}
+
+
+def list_text(value) -> str:
+    if isinstance(value, list):
+        chunks = []
+        for item in value:
+            if isinstance(item, dict):
+                chunks.append(", ".join(str(v) for v in item.values() if v not in (None, "")))
+            else:
+                chunks.append(str(item))
+        return "\n".join(chunk for chunk in chunks if chunk)
+    if isinstance(value, dict):
+        return "\n".join(f"{key}: {val}" for key, val in value.items())
+    return str(value or "")
+
+
+def topic_intelligence_summary_html(result: dict) -> str:
+    audience = result.get("audience") or {}
+    pain_points = result.get("pain_points") or []
+    opportunities = result.get("content_opportunities") or []
+    video_direction = result.get("video_direction") or {}
+    quotes = result.get("user_quotes") or []
+    first_opportunity = opportunities[0] if opportunities and isinstance(opportunities[0], dict) else {}
+    useful_language = "\n".join(
+        str(item.get("quote") or "") if isinstance(item, dict) else str(item)
+        for item in quotes[:5]
+    )
+    rows = [
+        ("Topic Summary", result.get("core_summary") or ""),
+        ("Audience", list_text(audience)),
+        ("User Pain Points", list_text(pain_points)),
+        ("Core Emotion", list_text(result.get("emotional_triggers") or [])),
+        ("Content Opportunity", list_text(opportunities)),
+        ("Recommended Angle", first_opportunity.get("angle") or video_direction.get("recommended_hook") or ""),
+        ("Useful User Language", useful_language),
+    ]
+    content = "".join(
+        f"<div>{escape(label)}</div><div>{escape(str(value or '暂无'))}</div>"
+        for label, value in rows
+    )
+    return f"""
+      <details class="summary-box">
+        <summary>Topic Intelligence Summary</summary>
+        <div class="detail-grid" style="margin-top:12px">{content}</div>
+      </details>
+    """
+
+
+def editorial_field(output: dict, key: str, label: str, textarea: bool = False) -> str:
+    value = escape(str(output.get(key) or ""))
+    if textarea:
+        return f'<label>{label}<br><textarea class="field" name="{key}">{value}</textarea></label>'
+    return f'<label>{label}<br><input class="field full" name="{key}" value="{value}"></label>'
+
+
+def project_copy_text(project: dict, topic_result: dict, output: dict) -> str:
+    lines = [
+        f"Project: {project.get('title') or ''}",
+        f"Status: {project.get('status') or ''}",
+        f"Creation Mode: {project.get('creation_mode') or ''}",
+        f"Persona: {project.get('persona_name') or 'Default Creator'}",
+        f"Social Account: {project.get('social_account') or ''}",
+        "",
+        "Topic Intelligence",
+        f"Summary: {topic_result.get('core_summary') or ''}",
+        f"Audience: {list_text(topic_result.get('audience') or {})}",
+        f"Pain Points: {list_text(topic_result.get('pain_points') or [])}",
+        f"Opportunities: {list_text(topic_result.get('content_opportunities') or [])}",
+        "",
+        "Editorial Brief",
+        f"Content Goal: {output.get('content_goal') or ''}",
+        f"Main Angle: {output.get('main_angle') or ''}",
+        f"Hook: {output.get('hook') or ''}",
+        f"Core Message: {output.get('core_message') or output.get('script') or ''}",
+        f"Call To Action: {output.get('call_to_action') or ''}",
+        f"Tone: {output.get('tone') or ''}",
+        f"Platform: {output.get('platform') or ''}",
+        f"Target Duration: {output.get('target_duration') or project.get('duration_target') or ''}",
+        "",
+        "Scenes",
+    ]
+    for scene in project.get("scenes") or []:
+        lines.append(scene_plain_text(scene))
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def render_scene_card(db: Session, project: dict, scene: dict, index: int) -> str:
+    project_id = str(project["id"])
+    scene_id = str(scene["id"])
+    assets = scene_assets(db, scene_id)
+    latest_asset = assets[0] if assets else None
+    image_path = (latest_asset.get("file_path") or latest_asset.get("url") or "") if latest_asset else ""
+    preview = (
+        f'<img src="{escape(latest_asset.get("url") or latest_asset.get("file_path") or "")}" alt="Scene image" style="max-width:220px;border-radius:6px;border:1px solid var(--line);">'
+        f'<div class="label">图片路径</div><code>{escape(image_path)}</code>'
+        f'<div class="label">生成时间：{escape(latest_asset.get("created_at") or "")}</div>'
+        if latest_asset and (latest_asset.get("url") or latest_asset.get("file_path"))
+        else '<span class="status-warn">暂无图片</span>'
+    )
+    scene_tasks = [
+        task
+        for task in project.get("generation_tasks") or []
+        if task.get("scene_id") == scene_id and task.get("task_type") == "image_generation"
+    ]
+    latest_task = scene_tasks[0] if scene_tasks else {}
+    task_status = latest_task.get("status") or scene.get("status") or "等待"
+    task_error = latest_task.get("error_message") or ""
+    copy_text_id = f"scene-copy-{index}"
+    scene_text = scene_plain_text(scene)
+    return f"""
+      <section class="scene-card">
+        <div class="scene-header">
+          <div>
+            <h3>Scene {escape(str(scene.get("scene_number") or ""))}: {escape(scene.get("title") or "")}</h3>
+            <div class="label">图片任务状态：{escape(task_status)} {escape(task_error)}</div>
+          </div>
+          <div class="actions">
+            <button class="button secondary mini" type="button" onclick="copyTextById('{copy_text_id}', this)">复制完整 Scene</button>
+            <form method="post" action="/scenes/{escape(scene_id)}/move-form"><input type="hidden" name="direction" value="up"><input type="hidden" name="project_id" value="{escape(project_id)}"><button class="button secondary mini" type="submit">上移</button></form>
+            <form method="post" action="/scenes/{escape(scene_id)}/move-form"><input type="hidden" name="direction" value="down"><input type="hidden" name="project_id" value="{escape(project_id)}"><button class="button secondary mini" type="submit">下移</button></form>
+            <form method="post" action="/scenes/{escape(scene_id)}/copy-form"><input type="hidden" name="project_id" value="{escape(project_id)}"><button class="button secondary mini" type="submit">复制</button></form>
+            <form method="post" action="/scenes/{escape(scene_id)}/delete-form" onsubmit="return confirm('确认删除这个 Scene？')"><input type="hidden" name="project_id" value="{escape(project_id)}"><button class="button danger mini" type="submit">删除</button></form>
+          </div>
+        </div>
+        <textarea id="{copy_text_id}" class="copy-source">{escape(scene_text)}</textarea>
+        <form method="post" action="/scenes/{escape(scene_id)}/save-form">
+          <input type="hidden" name="project_id" value="{escape(project_id)}">
+          <div class="form-grid">
+            <label>Scene Title<br><input class="field full" name="title" value="{escape(scene.get("title") or "")}"></label>
+            <label>Purpose<br><input class="field full" name="purpose" value="{escape(scene.get("purpose") or "")}"></label>
+            <label>Duration Seconds<br><input class="field full" name="duration" value="{escape(str(scene.get("duration") or ""))}"></label>
+            <label>Camera Direction<br><input class="field full" name="camera_direction" value="{escape(scene.get("camera_direction") or "")}"></label>
+          </div>
+          <label>Visual Description<br><textarea class="field" name="visual_description">{escape(scene.get("visual_description") or scene.get("visual_prompt") or "")}</textarea></label>
+          <label>Voiceover Script <button class="button secondary mini" type="button" onclick="copyTextById('scene-voiceover-{index}', this)">复制</button><br><textarea id="scene-voiceover-{index}" class="field" name="voiceover">{escape(scene.get("voiceover") or "")}</textarea></label>
+          <label>On-screen Text <button class="button secondary mini" type="button" onclick="copyTextById('scene-on-screen-{index}', this)">复制</button><br><textarea id="scene-on-screen-{index}" class="field" name="on_screen_text">{escape(scene.get("on_screen_text") or scene.get("subtitle") or "")}</textarea></label>
+          <label>Image Prompt <button class="button secondary mini" type="button" onclick="copyTextById('scene-image-prompt-{index}', this)">复制</button><br><textarea id="scene-image-prompt-{index}" class="field" name="image_prompt">{escape(scene.get("image_prompt") or scene.get("visual_prompt") or "")}</textarea></label>
+          <label>Video Prompt <button class="button secondary mini" type="button" onclick="copyTextById('scene-video-prompt-{index}', this)">复制</button><br><textarea id="scene-video-prompt-{index}" class="field" name="video_prompt">{escape(scene.get("video_prompt") or "")}</textarea></label>
+          <label>Negative Prompt <button class="button secondary mini" type="button" onclick="copyTextById('scene-negative-prompt-{index}', this)">复制</button><br><textarea id="scene-negative-prompt-{index}" class="field" name="negative_prompt">{escape(scene.get("negative_prompt") or "")}</textarea></label>
+          <div class="toolbar"><button class="button" type="submit">保存 Scene</button></div>
+        </form>
+        <div class="panel" style="margin:12px 0 0">
+          <h4>生成图片</h4>
+          <div>{preview}</div>
+          <form method="post" action="/scenes/{escape(scene_id)}/generate-image-form" class="toolbar">
+            <input type="hidden" name="project_id" value="{escape(project_id)}">
+            <button class="button" type="submit">生成图片</button>
+          </form>
+        </div>
+      </section>
+    """
+
+
 @app.get("/video-projects/{project_id}", response_class=HTMLResponse)
 def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: Session = Depends(get_db)) -> HTMLResponse:
     row = db.get(StudioVideoProject, project_id)
     if not row:
         raise HTTPException(status_code=404, detail="video project not found")
     project = serialize_video_project(db, row, include_detail=True)
+    package = db.get(StudioTopicPackage, row.topic_package_id)
     brief = project.get("editorial_brief") or {}
     output = brief.get("output") or {}
+    topic_result = latest_topic_intelligence_result(db, row.topic_package_id)
     comfyui_notice = "" if get_settings().comfyui_effective_url else message_html("ComfyUI 未配置。", "warn")
-    scenes_rows = ""
-    for scene in project.get("scenes") or []:
-        assets = scene_assets(db, scene["id"])
-        latest_asset = assets[0] if assets else None
-        image_path = (latest_asset.get("file_path") or latest_asset.get("url") or "") if latest_asset else ""
-        preview = (
-            f'<img src="{escape(latest_asset.get("url") or latest_asset.get("file_path") or "")}" alt="Scene image" style="max-width:180px;border-radius:6px;border:1px solid var(--line);"><div class="label">图片路径</div><code>{escape(image_path)}</code>'
-            if latest_asset and (latest_asset.get("url") or latest_asset.get("file_path"))
-            else '<span class="status-warn">暂无图片</span>'
-        )
-        scene_tasks = [task for task in project.get("generation_tasks") or [] if task.get("scene_id") == scene["id"] and task.get("task_type") == "image_generation"]
-        latest_task = scene_tasks[0] if scene_tasks else {}
-        scenes_rows += (
-            "<tr>"
-            f'<td>{escape(str(scene["scene_number"]))}</td>'
-            f'<td>{escape(str(scene.get("duration") or ""))}</td>'
-            f'<td>{escape(scene.get("visual_prompt") or "")}</td>'
-            f'<td>{escape(scene.get("voiceover") or "")}</td>'
-            f'<td>{escape(scene.get("subtitle") or "")}</td>'
-            f'<td>{escape(scene.get("camera_direction") or "")}</td>'
-            f'<td>{escape(latest_task.get("status") or scene.get("status") or "等待")}</td>'
-            f'<td>{preview}</td>'
-            '<td><div class="actions">'
-            f'<form method="post" action="/scenes/{escape(scene["id"])}/generate-image-form"><input type="hidden" name="project_id" value="{escape(project["id"])}"><button class="button" type="submit">生成图片</button></form>'
-            "</div></td>"
-            "</tr>"
-        )
-    scenes_html = (
-        "<table><thead><tr><th>#</th><th>时长</th><th>画面Prompt</th><th>Voiceover</th><th>Subtitle</th><th>镜头</th><th>图片状态</th><th>预览</th><th>操作</th></tr></thead><tbody>"
-        + scenes_rows
-        + "</tbody></table>"
-    )
+    scenes_html = "".join(render_scene_card(db, project, scene, index) for index, scene in enumerate(project.get("scenes") or [], start=1))
+    if not scenes_html:
+        scenes_html = '<div class="placeholder">暂无 Scene。点击“新增 Scene”开始拆分脚本。</div>'
     task_types = {task.get("task_type") for task in project.get("generation_tasks") or []}
     pipeline = (project.get("generation_pipelines") or [None])[0] or {}
     stage_cards = [
@@ -2219,56 +2385,81 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
         )
         + "</div>"
         + (
-            "<table><thead><tr><th>Task ID</th><th>类型</th><th>Provider</th><th>状态</th><th>依赖</th><th>Context</th></tr></thead><tbody>"
+            "<table><thead><tr><th>Task ID</th><th>类型</th><th>Provider</th><th>Provider Task ID</th><th>状态</th><th>Asset状态</th><th>依赖</th></tr></thead><tbody>"
             + "".join(
                 "<tr>"
                 f'<td>{escape(task["id"])}</td>'
                 f'<td>{escape(task["task_type"])}</td>'
                 f'<td>{escape(task.get("provider_name") or task.get("provider") or "")}</td>'
+                f'<td>{escape(task.get("provider_task_id") or "")}</td>'
                 f'<td>{escape(task["status"])}</td>'
+                f'<td>{escape("已保存" if task_assets(db, task["id"]) else "暂无")}</td>'
                 f'<td>{escape(task.get("depends_on_task_id") or "")}</td>'
-                f'<td><details><summary>查看</summary><pre>{escape(json.dumps(task.get("context") or {}, ensure_ascii=False, indent=2))}</pre></details></td>'
                 "</tr>"
                 for task in project.get("generation_tasks") or []
             )
             + "</tbody></table>"
             if project.get("generation_tasks")
-            else '<div class="placeholder">尚未创建生成计划。当前版本只生成队列，不执行生成。</div>'
+            else '<div class="placeholder">尚未创建生成计划。当前版本可从 Scene 直接生成图片，也可创建完整生成计划。</div>'
         )
     )
+    project_copy = project_copy_text(project, topic_result, output)
+    editorial_form = f"""
+      <form method="post" action="/video-projects/{escape(project["id"])}/editorial-form">
+        <div class="form-grid">
+          {editorial_field(output, "content_goal", "Content Goal")}
+          {editorial_field(output, "main_angle", "Main Angle")}
+          {editorial_field(output, "tone", "Tone")}
+          {editorial_field(output, "platform", "Platform")}
+          {editorial_field(output, "target_duration", "Target Duration")}
+          {editorial_field(output, "call_to_action", "Call to Action")}
+        </div>
+        {editorial_field(output, "hook", "Hook", True)}
+        {editorial_field(output, "core_message", "Core Message", True)}
+        <div class="toolbar"><button class="button" type="submit">保存 Editorial Brief</button></div>
+      </form>
+    """
     body = f"""
-      <h1>{escape(project["title"])}</h1>
-      <p class="subtitle"><a href="/video-projects">返回视频项目</a></p>
+      <h1>Creator Workspace</h1>
+      <p class="subtitle"><a href="/video-projects">返回视频项目</a> · {escape(project["title"])}</p>
       {message_html(msg, level)}
+      <textarea id="project-copy-text" class="copy-source">{escape(project_copy)}</textarea>
       <section class="panel">
-        <h2>基础信息</h2>
+        <div class="scene-header">
+          <h2>Project Context</h2>
+          <button class="button secondary" type="button" onclick="copyTextById('project-copy-text', this)">复制完整项目</button>
+        </div>
         <div class="detail-grid">
-          <div>Topic Package</div><div>{escape(project["topic_package_id"])}</div>
+          <div>Title</div><div>{escape(project["title"])}</div>
+          <div>Status</div><div>{escape(project["status"])}</div>
+          <div>Creation Mode</div><div>{escape(project.get("creation_mode") or "")}</div>
+          <div>Persona</div><div>{escape(project.get("persona_name") or "Default Creator")}</div>
+          <div>Social Account</div><div>{escape(project.get("social_account") or "未绑定")}</div>
+          <div>Topic Package</div><div>{escape(package.title if package else project["topic_package_id"])}</div>
           <div>Editorial Brief</div><div>{escape(project["editorial_brief_id"])}</div>
-          <div>创作模式</div><div>{escape(project.get("creation_mode") or "")}</div>
-          <div>Persona</div><div>{escape(project.get("persona_name") or "")}</div>
-          <div>Publishing Account</div><div>{escape(project.get("social_account") or "")}</div>
-          <div>状态</div><div>{escape(project["status"])}</div>
-          <div>目标平台</div><div>{escape(", ".join(project.get("target_platforms") or []))}</div>
-          <div>画幅</div><div>{escape(project.get("aspect_ratio") or "")}</div>
-          <div>目标时长</div><div>{escape(str(project.get("duration_target") or ""))}</div>
+          <div>Updated At</div><div>{escape(project.get("updated_at") or "")}</div>
+          <div>Aspect Ratio</div><div>{escape(project.get("aspect_ratio") or "")}</div>
         </div>
       </section>
       <section class="panel">
-        <h2>Script</h2>
-        <h3>Hook</h3>
-        <p>{escape(str(output.get("hook") or ""))}</p>
-        <h3>Script</h3>
-        <p>{escape(str(output.get("script") or ""))}</p>
+        <h2>Topic Intelligence</h2>
+        {topic_intelligence_summary_html(topic_result)}
       </section>
       <section class="panel">
-        <h2>Scenes</h2>
+        <h2>Editorial & Script</h2>
+        {editorial_form}
+      </section>
+      <section class="panel">
+        <div class="scene-header">
+          <h2>Scenes</h2>
+          <form method="post" action="/video-projects/{escape(project["id"])}/scenes/add-form"><button class="button" type="submit">新增 Scene</button></form>
+        </div>
         {comfyui_notice}
         {scenes_html}
       </section>
       <section class="panel">
         <h2>Video Generation Pipeline</h2>
-        <p class="subtitle">Generation状态：当前只创建计划和队列任务，不执行真实生成。</p>
+        <p class="subtitle">Generation状态：保留完整计划队列；Scene 级别可执行 Sprint 12 图片生成闭环。</p>
         <form method="post" action="/video-projects/{escape(project["id"])}/generation-plan-form" class="toolbar">
           <button class="button" type="submit">创建生成计划</button>
           <a class="button secondary" href="/generation-queue">查看生成队列</a>
@@ -2277,6 +2468,81 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
       </section>
     """
     return render_shell("video-projects", "视频项目详情", body)
+
+
+@app.post("/video-projects/{project_id}/editorial-form")
+async def video_project_editorial_form(project_id: str, request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    try:
+        update_editorial_workspace(db, project_id, dict(form))
+        db.commit()
+        return RedirectResponse(f"/video-projects/{project_id}?msg=Editorial Brief 已保存", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/video-projects/{project_id}/scenes/add-form")
+async def video_project_scene_add_form(project_id: str, db: Session = Depends(get_db)):
+    try:
+        create_scene(db, project_id)
+        db.commit()
+        return RedirectResponse(f"/video-projects/{project_id}?msg=Scene 已新增", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/scenes/{scene_id}/save-form")
+async def scene_save_form(scene_id: str, request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    project_id = form.get("project_id", "")
+    try:
+        update_scene(db, scene_id, dict(form))
+        db.commit()
+        return RedirectResponse(f"/video-projects/{project_id}?msg=Scene 已保存", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/scenes/{scene_id}/copy-form")
+async def scene_copy_form(scene_id: str, request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    project_id = form.get("project_id", "")
+    try:
+        copy_scene(db, scene_id)
+        db.commit()
+        return RedirectResponse(f"/video-projects/{project_id}?msg=Scene 已复制", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/scenes/{scene_id}/move-form")
+async def scene_move_form(scene_id: str, request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    project_id = form.get("project_id", "")
+    try:
+        move_scene(db, scene_id, form.get("direction", "down"))
+        db.commit()
+        return RedirectResponse(f"/video-projects/{project_id}?msg=Scene 顺序已更新", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/scenes/{scene_id}/delete-form")
+async def scene_delete_form(scene_id: str, request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    project_id = form.get("project_id", "")
+    try:
+        project_id = delete_scene(db, scene_id) or project_id
+        db.commit()
+        return RedirectResponse(f"/video-projects/{project_id}?msg=Scene 已删除", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
 
 
 @app.post("/video-projects/{project_id}/generation-plan-form")

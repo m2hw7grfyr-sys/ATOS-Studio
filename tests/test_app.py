@@ -14,7 +14,7 @@ from config.settings import get_settings
 from config.settings import Settings
 from database import Base
 from models.schemas import AtosContentItem
-from models.production import StudioGenerationWorkflow
+from models.production import StudioGenerationWorkflow, StudioVideoScene
 from repositories.content_items import stable_json
 from services.ai.providers.llm_provider import LLMGeneration, LLMHealth
 from services.generation.providers.comfyui.provider import ComfyUIProvider
@@ -101,6 +101,13 @@ class StudioAppTests(unittest.TestCase):
         self.assertIn("basic_image_generation", content)
         self.assertIn("COMFYUI_URL=http://127.0.0.1:8188", env_content)
         self.assertNotIn("COMFYUI_ENABLED=false", env_content)
+
+    def test_creator_workspace_migration_exists(self):
+        with open("migrations/versions/0012_add_creator_workspace_scene_fields.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("title", content)
+        self.assertIn("image_prompt", content)
+        self.assertIn("on_screen_text", content)
 
 
 class ContentPoolTests(unittest.TestCase):
@@ -994,6 +1001,104 @@ class ContentPoolTests(unittest.TestCase):
         self.assertEqual(health.json()["status"], "not_configured")
         missing = self.client.get("/api/generation/providers/unknown/health")
         self.assertEqual(missing.status_code, 404)
+
+    def test_creator_workspace_editorial_scene_operations_and_copy_ui(self):
+        item_id = self.create_pushed_item("creator-1", "Creators need reusable ADHD story scenes", 95, 24, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "Reusable ADHD scenes", "content_item_ids": [item_id]},
+        ).json()
+        self.create_topic_intelligence_analysis(package["id"])
+        self.create_prompt("editorial")
+        prompt = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        brief = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": self.valid_editorial_output("Creator Workspace Scene"),
+            },
+        ).json()
+        project = self.client.post(
+            "/api/video-projects/from-brief",
+            json={"editorial_brief_id": brief["id"], "creation_mode": "general"},
+        ).json()
+        project_id = project["id"]
+        scene_id = project["scenes"][0]["id"]
+
+        page = self.client.get(f"/video-projects/{project_id}")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Creator Workspace", page.text)
+        self.assertIn("Project Context", page.text)
+        self.assertIn("Default Creator", page.text)
+        self.assertIn("Topic Intelligence Summary", page.text)
+        self.assertIn("复制完整项目", page.text)
+        self.assertIn("保存 Editorial Brief", page.text)
+        self.assertIn("复制完整 Scene", page.text)
+        self.assertIn("scene-image-prompt-1", page.text)
+        self.assertIn("生成图片", page.text)
+
+        saved_editorial = self.client.post(
+            f"/video-projects/{project_id}/editorial-form",
+            data={
+                "content_goal": "Teach a reusable scene workflow",
+                "main_angle": "Small repeatable scenes",
+                "hook": "Build scenes before you build videos",
+                "core_message": "Scene structure lowers creative friction.",
+                "call_to_action": "Save this workspace",
+                "tone": "calm",
+                "platform": "tiktok",
+                "target_duration": "35",
+            },
+        )
+        self.assertEqual(saved_editorial.status_code, 200)
+        self.assertIn("Build scenes before you build videos", saved_editorial.text)
+        self.assertIn("Editorial Brief 已保存", saved_editorial.text)
+
+        saved_scene = self.client.post(
+            f"/scenes/{scene_id}/save-form",
+            data={
+                "project_id": project_id,
+                "title": "Opening Setup",
+                "purpose": "Hook the viewer",
+                "duration": "6",
+                "camera_direction": "desk close-up",
+                "visual_description": "A creator desk with messy notes",
+                "voiceover": "Start with the scene, not the whole video.",
+                "on_screen_text": "Start smaller",
+                "image_prompt": "anime style creator desk, gray hoodie",
+                "video_prompt": "slow push-in on desk notes",
+                "negative_prompt": "blurry, extra fingers",
+            },
+        )
+        self.assertEqual(saved_scene.status_code, 200)
+        self.assertIn("Opening Setup", saved_scene.text)
+        self.assertIn("anime style creator desk", saved_scene.text)
+        self.assertIn("Start smaller", saved_scene.text)
+
+        copied = self.client.post(f"/scenes/{scene_id}/copy-form", data={"project_id": project_id})
+        self.assertEqual(copied.status_code, 200)
+        added = self.client.post(f"/video-projects/{project_id}/scenes/add-form")
+        self.assertEqual(added.status_code, 200)
+        with self.Session() as db:
+            scenes = db.query(StudioVideoScene).filter_by(video_project_id=project_id).order_by(StudioVideoScene.scene_number.asc()).all()
+            self.assertEqual(len(scenes), 3)
+            self.assertEqual([scene.scene_number for scene in scenes], [1, 2, 3])
+            third_id = scenes[2].id
+
+        moved = self.client.post(f"/scenes/{third_id}/move-form", data={"project_id": project_id, "direction": "up"})
+        self.assertEqual(moved.status_code, 200)
+        with self.Session() as db:
+            scenes = db.query(StudioVideoScene).filter_by(video_project_id=project_id).order_by(StudioVideoScene.scene_number.asc()).all()
+            self.assertEqual(scenes[1].id, third_id)
+
+        deleted = self.client.post(f"/scenes/{third_id}/delete-form", data={"project_id": project_id})
+        self.assertEqual(deleted.status_code, 200)
+        with self.Session() as db:
+            scenes = db.query(StudioVideoScene).filter_by(video_project_id=project_id).order_by(StudioVideoScene.scene_number.asc()).all()
+            self.assertEqual(len(scenes), 2)
+            self.assertEqual([scene.scene_number for scene in scenes], [1, 2])
 
     def test_comfyui_image_generation_task_asset_and_page(self):
         item_id = self.create_pushed_item("comfyui-1", "A quiet desk scene for ADHD planning", 88, 14, "low")

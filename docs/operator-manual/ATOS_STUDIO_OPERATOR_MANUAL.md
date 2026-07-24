@@ -778,6 +778,172 @@ Persona 会影响 GPT Prompt。
 
 Sprint 11 支持 Workflow 管理、模型能力登记和 ComfyUI 图片生成前检查。视频生成、配音、字幕、合成仍未实现。
 
+## 12.1 Creator Workspace 场景生产工作台
+
+Creator Workspace 是视频项目详情页的升级版本。
+
+它不是一个新的项目系统。
+
+它把以下操作集中在同一个页面：
+
+- 查看项目上下文
+- 查看主题智能分析摘要
+- 编辑 Editorial Brief
+- 新增、编辑、复制、删除 Scene
+- 调整 Scene 顺序
+- 复制 Voiceover、Image Prompt、Video Prompt、Negative Prompt、On-screen Text
+- 复制完整 Scene
+- 复制完整项目
+- 触发 Scene 图片生成
+- 查看 Scene 最新图片资产
+
+### 进入方式
+
+打开：
+
+`视频项目`
+
+点击某个项目的：
+
+`查看`
+
+进入后页面标题显示：
+
+`Creator Workspace`
+
+### Project Context
+
+Project Context 显示：
+
+- Title
+- Status
+- Creation Mode
+- Persona
+- Social Account
+- Topic Package
+- Editorial Brief
+- Updated At
+
+如果项目没有绑定 Persona，系统会显示：
+
+`Default Creator`
+
+这表示当前项目使用通用创作模式。
+
+### Topic Intelligence Summary
+
+Topic Intelligence Summary 默认折叠。
+
+展开后可以查看：
+
+- Topic Summary
+- Audience
+- User Pain Points
+- Core Emotion
+- Content Opportunity
+- Recommended Angle
+- Useful User Language
+
+这里的数据来自主题包的 AI 分析结果。
+
+如果还没有运行主题智能分析，页面会显示暂无内容。
+
+### Editorial & Script
+
+这里可以编辑：
+
+- Content Goal
+- Main Angle
+- Hook
+- Core Message
+- Call to Action
+- Tone
+- Platform
+- Target Duration
+
+修改后点击：
+
+`保存 Editorial Brief`
+
+系统会保存到当前 Editorial Brief，不会创建新版本。
+
+如果需要多个版本，请回到 GPT 编导流程重新生成 Editorial Brief。
+
+### Scenes
+
+每个 Scene 支持：
+
+- 保存
+- 删除
+- 复制
+- 上移
+- 下移
+- 复制完整 Scene
+- 生成图片
+
+Scene 字段包括：
+
+- Scene Title
+- Purpose
+- Duration Seconds
+- Visual Description
+- Voiceover Script
+- On-screen Text
+- Image Prompt
+- Video Prompt
+- Negative Prompt
+- Camera Direction
+
+### 复制功能
+
+每个文本区旁边都有复制按钮。
+
+常用复制项：
+
+- Voiceover Script
+- On-screen Text
+- Image Prompt
+- Video Prompt
+- Negative Prompt
+
+页面顶部支持：
+
+`复制完整项目`
+
+适合把项目、主题分析、Editorial Brief 和所有 Scenes 一次性复制给外部工具。
+
+### 图片生成
+
+Scene 下方保留：
+
+`生成图片`
+
+点击后会沿用已有流程：
+
+Scene
+
+↓
+
+Generation Task
+
+↓
+
+ComfyUI Adapter
+
+↓
+
+Asset
+
+↓
+
+Scene 图片预览
+
+如果 ComfyUI 没有配置，页面会提示：
+
+`ComfyUI 未配置。`
+
+此时仍然可以编辑和复制文本，不影响编导工作。
+
 ## 13. 常见问题
 
 ### AI任务失败
