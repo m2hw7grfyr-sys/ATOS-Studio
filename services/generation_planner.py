@@ -21,6 +21,13 @@ from services.video_production import (
 
 
 DEFAULT_PROVIDER_NAME = "mock"
+TASK_DEFAULT_ENGINES = {
+    "image_generation": "comfyui",
+    "video_generation": "wan",
+    "voice_generation": "local_tts",
+    "subtitle_generation": "local_tts",
+    "composition": "ffmpeg",
+}
 
 
 def generation_context(project: StudioVideoProject, scene: Optional[StudioVideoScene] = None) -> dict[str, Any]:
@@ -39,17 +46,19 @@ def _new_task(
     task_type: str,
     scene: Optional[StudioVideoScene] = None,
     depends_on_task_id: Optional[str] = None,
-    provider_name: str = DEFAULT_PROVIDER_NAME,
+    provider_name: str = "",
 ) -> StudioGenerationTask:
     if task_type not in GENERATION_TASK_TYPES:
         raise HTTPException(status_code=422, detail=f"unsupported generation task type: {task_type}")
     context = generation_context(project, scene)
+    engine = provider_name or TASK_DEFAULT_ENGINES.get(task_type, DEFAULT_PROVIDER_NAME)
     return StudioGenerationTask(
         video_project_id=project.id,
         scene_id=scene.id if scene else None,
         task_type=task_type,
-        provider=provider_name,
-        provider_name=provider_name,
+        provider=engine,
+        provider_name=engine,
+        engine_id=engine,
         status="queued",
         priority=project.priority or "normal",
         max_retry=3,

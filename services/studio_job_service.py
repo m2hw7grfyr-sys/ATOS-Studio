@@ -286,11 +286,11 @@ def start_job_generation(db: Session, project_id: str) -> dict[str, Any]:
     return get_studio_job(db, project_id)
 
 
-def create_reviewed_scene_image_task(db: Session, scene_id: str, provider_name: str = "comfyui", workflow_id: Optional[str] = None):
+def create_reviewed_scene_image_task(db: Session, scene_id: str, provider_name: str = "comfyui", workflow_id: Optional[str] = None, preset_id: Optional[str] = None):
     scene = db.get(StudioVideoScene, scene_id)
     if not scene:
         raise HTTPException(status_code=404, detail="scene not found")
     project = project_or_404(db, scene.video_project_id)
     if project.review_status != "approved":
         raise HTTPException(status_code=409, detail="job must be approved before generation starts")
-    return create_scene_image_task(db, scene_id, provider_name, workflow_id)
+    return create_scene_image_task(db, scene_id, provider_name, workflow_id, preset_id)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import Base
@@ -115,6 +115,14 @@ class StudioGenerationTask(Base):
     context_json: Mapped[str] = mapped_column(Text, default="{}")
     input_json: Mapped[str] = mapped_column(Text, default="{}")
     output_json: Mapped[str] = mapped_column(Text, default="{}")
+    preset_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_presets.id"), index=True)
+    engine_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    model_profile_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_model_capabilities.id"), index=True)
+    workflow_profile_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_workflows.id"), index=True)
+    configuration_version: Mapped[str] = mapped_column(String(40), default="legacy")
+    configuration_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    preflight_result_json: Mapped[str] = mapped_column(Text, default="{}")
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     error_message: Mapped[Optional[str]] = mapped_column(String(1000))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
@@ -143,6 +151,7 @@ class StudioGenerationWorkflow(Base):
     workflow_type: Mapped[str] = mapped_column(String(80), index=True)
     status: Mapped[str] = mapped_column(String(40), default="draft", index=True)
     workflow_json: Mapped[str] = mapped_column(Text, default="{}")
+    workflow_path: Mapped[str] = mapped_column(String(1000), default="")
     tags_json: Mapped[str] = mapped_column(Text, default="[]")
     required_models_json: Mapped[str] = mapped_column(Text, default="[]")
     test_result_json: Mapped[str] = mapped_column(Text, default="{}")
@@ -172,10 +181,86 @@ class StudioModelCapability(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     name: Mapped[str] = mapped_column(String(200), index=True)
+    display_name: Mapped[str] = mapped_column(String(200), default="")
     provider: Mapped[str] = mapped_column(String(120), index=True)
+    engine_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    capability: Mapped[str] = mapped_column(String(80), default="", index=True)
     model_type: Mapped[str] = mapped_column(String(40), index=True)
+    model_identifier: Mapped[str] = mapped_column(String(500), default="")
+    workflow_path: Mapped[str] = mapped_column(String(1000), default="")
+    checkpoint_path: Mapped[str] = mapped_column(String(1000), default="")
+    vae_path: Mapped[str] = mapped_column(String(1000), default="")
+    lora_paths_json: Mapped[str] = mapped_column(Text, default="[]")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    estimated_vram_gb: Mapped[Optional[float]] = mapped_column(Float)
+    supported_widths_json: Mapped[str] = mapped_column(Text, default="[]")
+    supported_heights_json: Mapped[str] = mapped_column(Text, default="[]")
+    supported_durations_json: Mapped[str] = mapped_column(Text, default="[]")
+    supported_fps_json: Mapped[str] = mapped_column(Text, default="[]")
+    supported_aspect_ratios_json: Mapped[str] = mapped_column(Text, default="[]")
+    default_parameters_json: Mapped[str] = mapped_column(Text, default="{}")
+    validation_rules_json: Mapped[str] = mapped_column(Text, default="{}")
     version: Mapped[str] = mapped_column(String(80), default="")
     status: Mapped[str] = mapped_column(String(40), default="missing", index=True)
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class StudioGenerationPreset(Base):
+    __tablename__ = "studio_generation_presets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    display_name: Mapped[str] = mapped_column(String(200), default="")
+    capability: Mapped[str] = mapped_column(String(80), index=True)
+    engine_id: Mapped[str] = mapped_column(String(120), index=True)
+    model_profile_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_model_capabilities.id"), index=True)
+    workflow_profile_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_workflows.id"), index=True)
+    parameters_json: Mapped[str] = mapped_column(Text, default="{}")
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=120)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    fallback_preset_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_presets.id"), index=True)
+    remark: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class StudioGenerationConfigSnapshot(Base):
+    __tablename__ = "studio_generation_config_snapshots"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    generation_task_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_tasks.id"), index=True)
+    video_project_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_video_projects.id"), index=True)
+    scene_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_video_scenes.id"), index=True)
+    capability: Mapped[str] = mapped_column(String(80), index=True)
+    engine_id: Mapped[str] = mapped_column(String(120), index=True)
+    preset_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_presets.id"), index=True)
+    model_profile_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_model_capabilities.id"), index=True)
+    workflow_profile_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_workflows.id"), index=True)
+    snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    configuration_version: Mapped[str] = mapped_column(String(40), default="1")
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    fallback_from_preset_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_presets.id"), index=True)
+    fallback_to_preset_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_presets.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class StudioPreflightResult(Base):
+    __tablename__ = "studio_preflight_results"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    generation_task_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_tasks.id"), index=True)
+    video_project_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_video_projects.id"), index=True)
+    scene_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_video_scenes.id"), index=True)
+    engine_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    preset_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("studio_generation_presets.id"), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    checks_json: Mapped[str] = mapped_column(Text, default="[]")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)

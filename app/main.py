@@ -63,8 +63,21 @@ from services.gpt_prompt_builder import (
 )
 from services.generation.provider_registry import (
     get_generation_provider,
+    health_check_all,
+    list_engines_by_capability,
+    list_generation_engines,
     list_generation_providers,
     provider_health,
+)
+from services.generation_config import (
+    create_or_update_generation_preset,
+    generation_engines_payload,
+    job_generation_config,
+    list_generation_presets,
+    list_model_profiles,
+    retry_with_config,
+    run_generation_preflight,
+    serialize_generation_preset,
 )
 from services.generation_planner import (
     create_generation_plan,
@@ -160,6 +173,7 @@ NAV_ITEMS = [
     ("video-projects", "/video-projects", "视频项目"),
     ("studio-jobs", "/studio-jobs", "任务中心"),
     ("generation-queue", "/generation-queue", "生成队列"),
+    ("generation-settings", "/generation-settings", "生成设置"),
     ("workflows", "/workflows", "Workflow管理"),
     ("assets", "/assets", "素材库"),
     ("renders", "/renders", "成片库"),
@@ -173,6 +187,7 @@ PLACEHOLDER_PAGES = {
     "accounts": "账号管理",
     "studio-jobs": "任务中心",
     "generation-queue": "生成队列",
+    "generation-settings": "生成设置",
     "workflows": "Workflow管理",
     "assets": "素材库",
     "renders": "成片库",
@@ -1991,6 +2006,18 @@ def generation_providers_api() -> dict:
     return {"items": list_generation_providers()}
 
 
+@app.get("/api/studio/generation/engines")
+def studio_generation_engines_api(capability: str = "") -> dict:
+    if capability:
+        return {"items": list_engines_by_capability(capability)}
+    return generation_engines_payload()
+
+
+@app.get("/api/studio/generation/engines/health")
+def studio_generation_engine_health_all_api() -> dict:
+    return health_check_all()
+
+
 @app.get("/api/generation/providers/{provider_name}/health")
 def generation_provider_health_api(provider_name: str) -> dict:
     try:
@@ -2031,6 +2058,11 @@ def model_capabilities_api(provider: str = "", model_type: str = "", status_filt
     return {"items": list_model_capabilities(db, provider or None, model_type or None, status_filter or None)}
 
 
+@app.get("/api/studio/generation/models")
+def studio_generation_models_api(capability: str = "", engine_id: str = "", enabled: Optional[bool] = None, db: Session = Depends(get_db)) -> dict:
+    return {"items": list_model_profiles(db, capability or None, engine_id or None, enabled)}
+
+
 @app.post("/api/model-capabilities")
 def create_model_capability_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
     row = create_model_capability(db, payload)
@@ -2045,9 +2077,54 @@ def update_model_capability_api(model_id: str, payload: dict = Body(...), db: Se
     return serialize_model_capability(row)
 
 
+@app.get("/api/studio/generation/presets")
+def studio_generation_presets_api(capability: str = "", engine_id: str = "", enabled: Optional[bool] = None, db: Session = Depends(get_db)) -> dict:
+    return {"items": list_generation_presets(db, capability or None, engine_id or None, enabled)}
+
+
+@app.post("/api/studio/generation/presets")
+def create_generation_preset_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = create_or_update_generation_preset(db, payload)
+    db.commit()
+    return serialize_generation_preset(row)
+
+
+@app.patch("/api/studio/generation/presets/{preset_id}")
+def update_generation_preset_api(preset_id: str, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = create_or_update_generation_preset(db, payload, preset_id)
+    db.commit()
+    return serialize_generation_preset(row)
+
+
+@app.post("/api/studio/generation/preflight")
+def studio_generation_preflight_api(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    return run_generation_preflight(
+        db,
+        str(payload.get("project_id") or ""),
+        str(payload.get("task_type") or "image_generation"),
+        str(payload.get("scene_id") or "") or None,
+        str(payload.get("preset_id") or "") or None,
+        payload.get("parameters") or {},
+        None,
+        True,
+    )
+
+
+@app.get("/api/studio/jobs/{job_id}/generation-config")
+def studio_job_generation_config_api(job_id: str, db: Session = Depends(get_db)) -> dict:
+    return job_generation_config(db, job_id)
+
+
+@app.post("/api/studio/jobs/{job_id}/retry-with-config")
+def studio_job_retry_with_config_api(job_id: str, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = retry_with_config(db, job_id, str(payload.get("preset_id") or ""), str(payload.get("from_step") or ""))
+    db.commit()
+    return row
+
+
 @app.post("/api/scenes/{scene_id}/generate-image")
-def create_scene_image_task_api(scene_id: str, run_now: bool = True, workflow_id: str = "", db: Session = Depends(get_db)) -> dict:
-    task = create_reviewed_scene_image_task(db, scene_id, "comfyui", workflow_id or None)
+def create_scene_image_task_api(scene_id: str, run_now: bool = True, workflow_id: str = "", preset_id: str = "", db: Session = Depends(get_db)) -> dict:
+    task = create_reviewed_scene_image_task(db, scene_id, "comfyui", workflow_id or None, preset_id or None)
     if run_now:
         payload = run_generation_task(db, task.id)
     else:
@@ -2452,6 +2529,31 @@ def studio_job_task_table(tasks: list[dict]) -> str:
     )
 
 
+def generation_config_summary_html(job_id: str, db: Session) -> str:
+    config = job_generation_config(db, job_id)
+    items = config.get("items") or []
+    if not items:
+        return '<div class="placeholder">暂无生成配置快照。任务开始生成后会保存当时使用的 engine、model、workflow、preset 与预检结果。</div>'
+    rows = "".join(
+        "<tr>"
+        f'<td>{escape(item.get("task_type") or "")}</td>'
+        f'<td>{escape((item.get("snapshot") or {}).get("engine_id") or "")}</td>'
+        f'<td>{escape((item.get("snapshot") or {}).get("model_name") or "")}</td>'
+        f'<td>{escape((item.get("snapshot") or {}).get("preset_name") or "")}</td>'
+        f'<td>{escape((item.get("snapshot") or {}).get("configuration_version") or "legacy")}</td>'
+        f'<td>{escape((item.get("preflight") or {}).get("status") or "")}</td>'
+        f'<td>{escape("是" if (item.get("snapshot") or {}).get("fallback_used") else "否")}</td>'
+        f'<td><details><summary>详情</summary><pre>{escape(json.dumps(item, ensure_ascii=False, indent=2))}</pre></details></td>'
+        "</tr>"
+        for item in items
+    )
+    return (
+        "<table><thead><tr><th>任务类型</th><th>Engine</th><th>Model</th><th>Preset</th><th>版本</th><th>Preflight</th><th>Fallback</th><th>详情</th></tr></thead><tbody>"
+        + rows
+        + "</tbody></table>"
+    )
+
+
 @app.get("/studio-jobs/{job_id}", response_class=HTMLResponse)
 def studio_job_detail_page(job_id: str, msg: str = "", level: str = "ok", db: Session = Depends(get_db)) -> HTMLResponse:
     job = get_studio_job(db, job_id)
@@ -2503,6 +2605,10 @@ def studio_job_detail_page(job_id: str, msg: str = "", level: str = "ok", db: Se
       <section class="panel">
         <h2>生成状态</h2>
         {studio_job_task_table(job.get("generation_tasks") or [])}
+      </section>
+      <section class="panel">
+        <h2>生成配置与预检</h2>
+        {generation_config_summary_html(job_id, db)}
       </section>
       <section class="panel" id="outputs">
         <h2>生成结果</h2>
@@ -2625,6 +2731,12 @@ def render_scene_card(db: Session, project: dict, scene: dict, index: int) -> st
     latest_task = scene_tasks[0] if scene_tasks else {}
     task_status = latest_task.get("status") or scene.get("status") or "等待"
     task_error = latest_task.get("error_message") or ""
+    preset_options = "".join(
+        f'<option value="{escape(row["id"])}">{escape(row.get("display_name") or row["name"])} · {escape(row["engine_id"])}</option>'
+        for row in list_generation_presets(db, "image", None, True)
+    )
+    if not preset_options:
+        preset_options = '<option value="">未配置可用 image preset</option>'
     copy_text_id = f"scene-copy-{index}"
     scene_text = scene_plain_text(scene)
     return f"""
@@ -2664,6 +2776,8 @@ def render_scene_card(db: Session, project: dict, scene: dict, index: int) -> st
           <div>{preview}</div>
           <form method="post" action="/scenes/{escape(scene_id)}/generate-image-form" class="toolbar">
             <input type="hidden" name="project_id" value="{escape(project_id)}">
+            <label>Preset<br><select class="field" name="preset_id">{preset_options}</select></label>
+            <button class="button secondary" name="preflight_only" value="1" type="submit">运行预检</button>
             <button class="button" type="submit">生成图片</button>
           </form>
         </div>
@@ -2969,8 +3083,15 @@ async def video_project_generation_plan_form(project_id: str, db: Session = Depe
 async def scene_generate_image_form(scene_id: str, request: Request, db: Session = Depends(get_db)):
     form = await parse_urlencoded(request)
     project_id = form.get("project_id", "")
+    preset_id = form.get("preset_id", "")
     try:
-        task = create_reviewed_scene_image_task(db, scene_id, "comfyui")
+        if form.get("preflight_only"):
+            preflight = run_generation_preflight(db, project_id, "image_generation", scene_id, preset_id or None, {}, None, True)
+            db.commit()
+            failed = any(check.get("status") == "failed" and check.get("blocking") for check in preflight.get("checks") or [])
+            message = "预检失败：" + ", ".join(check.get("code", "") for check in preflight.get("checks", []) if check.get("status") == "failed") if failed else f"预检状态：{preflight.get('status')}"
+            return RedirectResponse(f"/video-projects/{project_id}?level={'warn' if failed else 'ok'}&msg={quote(message)}", status_code=303)
+        task = create_reviewed_scene_image_task(db, scene_id, "comfyui", None, preset_id or None)
         payload = run_generation_task(db, task.id)
         db.commit()
         status_label = payload["task"]["status"]
@@ -3099,6 +3220,114 @@ async def generation_task_retry_form(task_id: str, db: Session = Depends(get_db)
     except Exception as exc:
         db.rollback()
         return RedirectResponse(f"/generation-queue?status=failed&level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.get("/generation-settings", response_class=HTMLResponse)
+def generation_settings_page(msg: str = "", level: str = "ok", db: Session = Depends(get_db)) -> HTMLResponse:
+    engines = list_generation_engines()
+    models = list_model_profiles(db)
+    presets = list_generation_presets(db)
+    engine_rows = "".join(
+        "<tr>"
+        f'<td>{escape(row.get("display_name") or row.get("engine_id") or row.get("provider") or "")}</td>'
+        f'<td>{escape(row.get("engine_id") or row.get("provider") or "")}</td>'
+        f'<td>{escape(", ".join(row.get("capabilities") or []))}</td>'
+        f'<td>{escape("可用" if row.get("available") else "不可用")}</td>'
+        f'<td>{escape(row.get("status") or "")}</td>'
+        f'<td>{escape(row.get("message") or "")}</td>'
+        "</tr>"
+        for row in engines
+    )
+    model_rows = "".join(
+        "<tr>"
+        f'<td>{escape(row.get("display_name") or row.get("name") or "")}</td>'
+        f'<td>{escape(row.get("engine_id") or "")}</td>'
+        f'<td>{escape(row.get("capability") or "")}</td>'
+        f'<td>{escape(row.get("model_type") or "")}</td>'
+        f'<td>{escape("是" if row.get("enabled") else "否")}</td>'
+        f'<td>{escape("是" if row.get("is_default") else "否")}</td>'
+        f'<td>{escape(str(row.get("estimated_vram_gb") or "unknown"))}</td>'
+        f'<td>{escape(row.get("status") or "")}</td>'
+        "</tr>"
+        for row in models
+    )
+    preset_rows = "".join(
+        "<tr>"
+        f'<td>{escape(row.get("display_name") or row.get("name") or "")}</td>'
+        f'<td>{escape(row.get("capability") or "")}</td>'
+        f'<td>{escape(row.get("engine_id") or "")}</td>'
+        f'<td>{escape(row.get("model_profile_id") or "")}</td>'
+        f'<td>{escape(row.get("workflow_profile_id") or "")}</td>'
+        f'<td>{escape("是" if row.get("is_default") else "否")}</td>'
+        f'<td>{escape("是" if row.get("enabled") else "否")}</td>'
+        f'<td><details><summary>参数</summary><pre>{escape(json.dumps(row.get("parameters") or {}, ensure_ascii=False, indent=2))}</pre></details></td>'
+        "</tr>"
+        for row in presets
+    )
+    workflow_options = "".join(
+        f'<option value="{escape(row["id"])}">{escape(row["name"])} · {escape(row["provider"])}</option>'
+        for row in list_workflows(db)
+    )
+    model_options = "".join(
+        f'<option value="{escape(row["id"])}">{escape(row["name"])} · {escape(row.get("engine_id") or row.get("provider") or "")}</option>'
+        for row in models
+    )
+    body = f"""
+      <h1>生成设置</h1>
+      <p class="subtitle">统一管理本地生成引擎、模型配置、Workflow 和 Preset。这里不会展示密钥，也不会自动下载模型。</p>
+      {message_html(msg, level)}
+      <section class="panel">
+        <h2>引擎状态</h2>
+        <p class="subtitle">重新打开页面即可重新检测；健康检查按需执行，不在 import 时联网。</p>
+        <table><thead><tr><th>引擎</th><th>ID</th><th>能力</th><th>可用</th><th>状态</th><th>错误摘要</th></tr></thead><tbody>{engine_rows}</tbody></table>
+      </section>
+      <section class="panel">
+        <h2>模型配置</h2>
+        <table><thead><tr><th>模型</th><th>Engine</th><th>能力</th><th>类型</th><th>启用</th><th>默认</th><th>预计显存GB</th><th>状态</th></tr></thead><tbody>{model_rows}</tbody></table>
+      </section>
+      <section class="panel">
+        <h2>Preset 配置</h2>
+        <table><thead><tr><th>Preset</th><th>能力</th><th>Engine</th><th>Model</th><th>Workflow</th><th>默认</th><th>启用</th><th>参数</th></tr></thead><tbody>{preset_rows}</tbody></table>
+      </section>
+      <section class="panel">
+        <h2>新增 Preset</h2>
+        <form method="post" action="/generation-settings/presets/create-form" class="toolbar">
+          <label>Name<br><input class="field" name="name" placeholder="image_scene_quality" required></label>
+          <label>Display<br><input class="field" name="display_name" placeholder="Image Scene Quality"></label>
+          <label>Capability<br><select class="field" name="capability"><option value="image">image</option><option value="video">video</option><option value="tts">tts</option><option value="composition">composition</option></select></label>
+          <label>Engine<br><select class="field" name="engine_id"><option value="comfyui">comfyui</option><option value="flux">flux</option><option value="wan">wan</option><option value="local_tts">local_tts</option><option value="ffmpeg">ffmpeg</option></select></label>
+          <label>Model<br><select class="field" name="model_profile_id">{model_options}</select></label>
+          <label>Workflow<br><select class="field" name="workflow_profile_id">{workflow_options}</select></label>
+          <label>Parameters JSON<br><textarea class="field" name="parameters_json">{{"width":768,"height":1024}}</textarea></label>
+          <button class="button" type="submit">创建 Preset</button>
+        </form>
+      </section>
+    """
+    return render_shell("generation-settings", "生成设置", body)
+
+
+@app.post("/generation-settings/presets/create-form")
+async def generation_preset_create_form(request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    try:
+        create_or_update_generation_preset(
+            db,
+            {
+                "name": form.get("name", ""),
+                "display_name": form.get("display_name", ""),
+                "capability": form.get("capability", ""),
+                "engine_id": form.get("engine_id", ""),
+                "model_profile_id": form.get("model_profile_id", ""),
+                "workflow_profile_id": form.get("workflow_profile_id", ""),
+                "parameters_json": form.get("parameters_json", "{}"),
+                "enabled": True,
+            },
+        )
+        db.commit()
+        return RedirectResponse("/generation-settings?msg=Preset 已创建", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/generation-settings?level=warn&msg={quote(str(exc))}", status_code=303)
 
 
 @app.get("/workflows", response_class=HTMLResponse)

@@ -18,6 +18,7 @@ from models.production import (
 )
 from repositories.content_items import parse_json, stable_json
 from services.generation.provider_registry import get_generation_provider
+from services.generation_config import blocking_failure, prepare_task_generation_config
 from services.generation_steps import GenerationStep, IMAGE_GENERATION_FLOW
 from services.generation_planner import generation_context
 from services.video_production import serialize_generation_task
@@ -69,8 +70,19 @@ def serialize_model_capability(row: StudioModelCapability) -> dict[str, Any]:
     return {
         "id": row.id,
         "name": row.name,
+        "display_name": row.display_name or row.name,
         "provider": row.provider,
+        "engine_id": row.engine_id or row.provider,
+        "capability": row.capability or row.model_type,
         "model_type": row.model_type,
+        "model_identifier": row.model_identifier,
+        "workflow_path": row.workflow_path,
+        "checkpoint_path": row.checkpoint_path,
+        "enabled": row.enabled,
+        "is_default": row.is_default,
+        "priority": row.priority,
+        "estimated_vram_gb": row.estimated_vram_gb,
+        "default_parameters": parse_json(row.default_parameters_json, {}),
         "version": row.version,
         "status": row.status,
         "metadata": parse_json(row.metadata_json, {}),
@@ -161,8 +173,27 @@ def create_model_capability(db: Session, payload: dict[str, Any]) -> StudioModel
         raise HTTPException(status_code=422, detail="invalid model capability status")
     row = StudioModelCapability(
         name=name,
+        display_name=str(payload.get("display_name") or name),
         provider=provider,
+        engine_id=str(payload.get("engine_id") or provider),
+        capability=str(payload.get("capability") or model_type),
         model_type=model_type,
+        model_identifier=str(payload.get("model_identifier") or ""),
+        workflow_path=str(payload.get("workflow_path") or ""),
+        checkpoint_path=str(payload.get("checkpoint_path") or ""),
+        vae_path=str(payload.get("vae_path") or ""),
+        lora_paths_json=stable_json(payload.get("lora_paths") or []),
+        enabled=bool(payload.get("enabled", True)),
+        is_default=bool(payload.get("is_default", False)),
+        priority=int(payload.get("priority") or 100),
+        estimated_vram_gb=payload.get("estimated_vram_gb"),
+        supported_widths_json=stable_json(payload.get("supported_widths") or []),
+        supported_heights_json=stable_json(payload.get("supported_heights") or []),
+        supported_durations_json=stable_json(payload.get("supported_durations") or []),
+        supported_fps_json=stable_json(payload.get("supported_fps") or []),
+        supported_aspect_ratios_json=stable_json(payload.get("supported_aspect_ratios") or []),
+        default_parameters_json=stable_json(payload.get("default_parameters") or {}),
+        validation_rules_json=stable_json(payload.get("validation_rules") or {}),
         version=str(payload.get("version") or ""),
         status=status,
         metadata_json=stable_json(payload.get("metadata") or {}),
@@ -176,7 +207,7 @@ def update_model_capability(db: Session, model_id: str, payload: dict[str, Any])
     row = db.get(StudioModelCapability, model_id)
     if not row:
         raise HTTPException(status_code=404, detail="model capability not found")
-    for field in ["name", "provider", "model_type", "version", "status"]:
+    for field in ["name", "display_name", "provider", "engine_id", "capability", "model_type", "model_identifier", "workflow_path", "checkpoint_path", "vae_path", "version", "status"]:
         if field in payload:
             value = str(payload.get(field) or "")
             if field == "provider":
@@ -184,6 +215,26 @@ def update_model_capability(db: Session, model_id: str, payload: dict[str, Any])
             if field == "status" and value not in {"available", "missing", "disabled"}:
                 raise HTTPException(status_code=422, detail="invalid model capability status")
             setattr(row, field, value)
+    for field in ["enabled", "is_default"]:
+        if field in payload:
+            setattr(row, field, bool(payload.get(field)))
+    if "priority" in payload:
+        row.priority = int(payload.get("priority") or 100)
+    if "estimated_vram_gb" in payload:
+        row.estimated_vram_gb = payload.get("estimated_vram_gb")
+    json_fields = {
+        "lora_paths": "lora_paths_json",
+        "supported_widths": "supported_widths_json",
+        "supported_heights": "supported_heights_json",
+        "supported_durations": "supported_durations_json",
+        "supported_fps": "supported_fps_json",
+        "supported_aspect_ratios": "supported_aspect_ratios_json",
+        "default_parameters": "default_parameters_json",
+        "validation_rules": "validation_rules_json",
+    }
+    for key, field in json_fields.items():
+        if key in payload:
+            setattr(row, field, stable_json(payload.get(key) or ([] if key.startswith("supported") or key == "lora_paths" else {})))
     if "metadata" in payload:
         row.metadata_json = stable_json(payload.get("metadata") or {})
     db.flush()
@@ -377,7 +428,7 @@ def asset_already_saved(db: Session, task: StudioGenerationTask, asset_payload: 
     return db.scalars(statement).first() is not None
 
 
-def create_scene_image_task(db: Session, scene_id: str, provider_name: str = "comfyui", workflow_id: Optional[str] = None) -> StudioGenerationTask:
+def create_scene_image_task(db: Session, scene_id: str, provider_name: str = "comfyui", workflow_id: Optional[str] = None, preset_id: Optional[str] = None) -> StudioGenerationTask:
     scene = db.get(StudioVideoScene, scene_id)
     if not scene:
         raise HTTPException(status_code=404, detail="scene not found")
@@ -388,6 +439,8 @@ def create_scene_image_task(db: Session, scene_id: str, provider_name: str = "co
     context["visual_prompt"] = scene.image_prompt or scene.visual_prompt or scene.visual_description
     if workflow_id:
         context["workflow_id"] = workflow_id
+    if preset_id:
+        context["preset_id"] = preset_id
     task = StudioGenerationTask(
         video_project_id=project.id,
         scene_id=scene.id,
@@ -399,6 +452,9 @@ def create_scene_image_task(db: Session, scene_id: str, provider_name: str = "co
         context_json=stable_json(context),
         input_json=stable_json({"context": context}),
         output_json="{}",
+        preset_id=preset_id,
+        engine_id=provider_name,
+        workflow_profile_id=workflow_id,
         max_retry=3,
     )
     db.add(task)
@@ -430,19 +486,34 @@ def run_generation_task(db: Session, task_id: str, retry_from_failed: bool = Fal
             mark_step_started(task, GenerationStep.PREPARE)
             mark_project_running(db, task)
             db.flush()
-            workflow_id = context.get("workflow_id")
+            try:
+                snapshot = prepare_task_generation_config(db, task, context.get("preset_id"), {})
+                context = parse_json(task.context_json, {})
+                provider_name = task.provider_name or task.provider or snapshot.get("engine_id") or provider_name
+            except HTTPException as exc:
+                preflight_payload = parse_json(task.preflight_result_json, {})
+                fail_task_from_reason(
+                    task,
+                    GenerationStep.PREPARE,
+                    str(exc.detail),
+                    {"preflight": preflight_payload},
+                )
+                mark_project_failed(db, task)
+                db.flush()
+                return {"task": serialize_generation_task(task), "assets": []}
+            workflow_id = context.get("workflow_id") or task.workflow_profile_id
             if workflow_id:
                 workflow = db.get(StudioGenerationWorkflow, str(workflow_id))
                 if not workflow:
                     raise HTTPException(status_code=404, detail="workflow not found")
             else:
                 workflow = enabled_workflow(db, provider_name, task.task_type)
-            preflight = preflight_generation_task(db, task, workflow)
-            if not preflight.get("ok"):
+            preflight = parse_json(task.preflight_result_json, {})
+            if blocking_failure(preflight):
                 fail_task_from_reason(
                     task,
                     GenerationStep.PREPARE,
-                    str(preflight.get("reason") or "preflight_failed"),
+                    "preflight_failed",
                     {"preflight": preflight},
                 )
                 mark_project_failed(db, task)

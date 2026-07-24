@@ -14,6 +14,8 @@ from services.generation.providers.base import GenerationProvider
 class ComfyUIProvider(GenerationProvider):
     provider_name = "comfyui"
     provider_type = "local_http"
+    display_name = "ComfyUI"
+    capabilities = ["image", "video"]
 
     def __init__(self, base_url: Optional[str] = None, timeout_seconds: Optional[float] = None, enabled: Optional[bool] = None) -> None:
         settings = get_settings()
@@ -47,6 +49,10 @@ class ComfyUIProvider(GenerationProvider):
         if not self.base_url:
             return {
                 "provider": self.provider_name,
+                "engine_id": self.provider_name,
+                "display_name": self.display_name,
+                "capabilities": self.capabilities,
+                "enabled": self.enabled,
                 "provider_type": self.provider_type,
                 "available": False,
                 "status": "not_configured",
@@ -55,6 +61,10 @@ class ComfyUIProvider(GenerationProvider):
         if not self.enabled:
             return {
                 "provider": self.provider_name,
+                "engine_id": self.provider_name,
+                "display_name": self.display_name,
+                "capabilities": self.capabilities,
+                "enabled": self.enabled,
                 "provider_type": self.provider_type,
                 "available": False,
                 "status": "disabled",
@@ -64,6 +74,10 @@ class ComfyUIProvider(GenerationProvider):
             payload = self._request("GET", "/system_stats")
             return {
                 "provider": self.provider_name,
+                "engine_id": self.provider_name,
+                "display_name": self.display_name,
+                "capabilities": self.capabilities,
+                "enabled": self.enabled,
                 "provider_type": self.provider_type,
                 "available": True,
                 "status": "available",
@@ -73,6 +87,10 @@ class ComfyUIProvider(GenerationProvider):
         except Exception as exc:
             return {
                 "provider": self.provider_name,
+                "engine_id": self.provider_name,
+                "display_name": self.display_name,
+                "capabilities": self.capabilities,
+                "enabled": self.enabled,
                 "provider_type": self.provider_type,
                 "available": False,
                 "status": "unavailable",

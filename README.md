@@ -587,6 +587,108 @@ Generation preflight checks:
 
 If a check fails, the Generation Task is marked `failed` and the queue shows the reason, such as `provider_offline`, `workflow_not_available`, or `missing_model`.
 
+## Local Generation Engine Registry And Preflight
+
+Sprint 16 adds a local generation engine registry so Studio does not hard-code model names, workflow IDs, or runtime clients inside task execution code.
+
+Open the Generation Settings page:
+
+```text
+http://127.0.0.1:8502/generation-settings
+```
+
+The page shows:
+
+- Engine status: ComfyUI, FLUX, Wan, Local TTS, FFmpeg, and reserved cloud adapters.
+- Model profiles: engine, capability, enabled/default flags, estimated VRAM, and status.
+- Generation presets: business-facing presets such as `image_scene_default`, linked to a model profile and workflow profile.
+
+New Sprint 16 APIs:
+
+```bash
+curl http://127.0.0.1:8502/api/studio/generation/engines
+curl "http://127.0.0.1:8502/api/studio/generation/engines?capability=image"
+curl http://127.0.0.1:8502/api/studio/generation/models
+curl http://127.0.0.1:8502/api/studio/generation/presets
+curl -X POST http://127.0.0.1:8502/api/studio/generation/preflight \
+  -H "Content-Type: application/json" \
+  -d '{"project_id":"...","scene_id":"...","task_type":"image_generation","preset_id":"...","parameters":{"width":768,"height":1024}}'
+curl http://127.0.0.1:8502/api/studio/jobs/{job_id}/generation-config
+```
+
+Configuration priority:
+
+```text
+task preset / task parameters
+-> project or scene configuration
+-> Studio default preset
+-> system defaults
+```
+
+When a task starts generation, Studio stores a configuration snapshot containing:
+
+- `engine_id`
+- `model_profile_id`
+- `workflow_profile_id`
+- `preset_id`
+- resolved parameters
+- configuration version
+- fallback metadata
+
+This means changing a default preset later will not change an already-created or already-running task. Sprint 14 retry keeps the original snapshot. Use `retry-with-config` only when you intentionally want a failed task to use a new preset.
+
+Preflight checks include:
+
+- engine reachability, such as ComfyUI `/system_stats`
+- workflow existence and JSON validity
+- required model availability
+- path traversal protection
+- output and temp directory writability
+- basic free disk space
+- GPU/VRAM detection when available
+- resolution, duration, and FPS support where configured
+
+Common error codes:
+
+```text
+ENGINE_NOT_CONFIGURED
+ENGINE_UNREACHABLE
+MODEL_NOT_FOUND
+WORKFLOW_NOT_FOUND
+WORKFLOW_INVALID
+FFMPEG_NOT_FOUND
+OUTPUT_DIRECTORY_UNWRITABLE
+INSUFFICIENT_DISK_SPACE
+GPU_NOT_FOUND
+INSUFFICIENT_VRAM
+UNSUPPORTED_RESOLUTION
+UNSUPPORTED_DURATION
+UNSUPPORTED_FPS
+INVALID_GENERATION_CONFIG
+```
+
+Fallback:
+
+```env
+STUDIO_ALLOW_PRESET_FALLBACK=false
+```
+
+Fallback is off by default. When enabled, Studio can evaluate lower-priority presets in the same capability and must record the selected fallback in the task snapshot. It never silently swaps an image task to a video model or changes configuration without storing the final resolved parameters.
+
+Local path variables:
+
+```env
+STUDIO_MODEL_ROOT=storage/models
+STUDIO_WORKFLOW_ROOT=storage/workflows
+STUDIO_OUTPUT_ROOT=storage/outputs
+STUDIO_TEMP_ROOT=storage/tmp
+STUDIO_MIN_FREE_DISK_GB=1
+FFMPEG_BINARY=ffmpeg
+FFPROBE_BINARY=ffprobe
+```
+
+Do not put API keys, SSH credentials, database passwords, model files, generated images, or private absolute paths in Git.
+
 ## Idempotency
 
 Duplicate imports do not create another row. Priority:

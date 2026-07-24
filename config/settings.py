@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     comfyui_enabled: bool = True
     comfyui_url: str = ""
     comfyui_timeout_seconds: float = 120
+    studio_model_root: str = Field(default=str(ROOT_DIR / "storage" / "models"))
+    studio_workflow_root: str = Field(default=str(ROOT_DIR / "storage" / "workflows"))
+    studio_output_root: str = Field(default=str(ROOT_DIR / "storage" / "outputs"))
+    studio_temp_root: str = Field(default=str(ROOT_DIR / "storage" / "tmp"))
+    studio_preflight_cache_seconds: int = 30
+    studio_min_free_disk_gb: float = 1.0
+    studio_allow_preset_fallback: bool = False
+    ffmpeg_binary: str = "ffmpeg"
+    ffprobe_binary: str = "ffprobe"
     gpu_worker_url: str = ""
     backup_provider: str = "none"
     backup_target: str = ""

@@ -123,6 +123,13 @@ class StudioAppTests(unittest.TestCase):
         self.assertIn("review_note", content)
         self.assertIn("editorial_json_snapshot", content)
 
+    def test_local_generation_engine_registry_migration_exists(self):
+        with open("migrations/versions/0015_add_local_generation_engine_registry.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("studio_generation_presets", content)
+        self.assertIn("studio_generation_config_snapshots", content)
+        self.assertIn("studio_preflight_results", content)
+
 
 class ContentPoolTests(unittest.TestCase):
     def setUp(self):
@@ -1287,7 +1294,10 @@ class ContentPoolTests(unittest.TestCase):
             def get_result(self, provider_task_id):
                 raise AssertionError("result should not be called after status failure")
 
-        with patch("services.generation_executor.get_generation_provider", return_value=FailsDuringStatus()):
+        with (
+            patch("services.generation_executor.get_generation_provider", return_value=FailsDuringStatus()),
+            patch("services.generation_config.get_generation_engine", return_value=FailsDuringStatus()),
+        ):
             failed = self.client.post(f"/api/generation-tasks/{task['id']}/run")
         self.assertEqual(failed.status_code, 200)
         failed_task = failed.json()["task"]
@@ -1463,7 +1473,10 @@ class ContentPoolTests(unittest.TestCase):
                     ],
                 }
 
-        with patch("services.generation_executor.get_generation_provider", return_value=FakeComfyUI()):
+        with (
+            patch("services.generation_executor.get_generation_provider", return_value=FakeComfyUI()),
+            patch("services.generation_config.get_generation_engine", return_value=FakeComfyUI()),
+        ):
             response = self.client.post(f"/api/scenes/{scene_id}/generate-image")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -1585,14 +1598,236 @@ class ContentPoolTests(unittest.TestCase):
         scene_id = project["scenes"][0]["id"]
         self.approve_project_for_generation(project["id"])
 
-        with patch("services.generation_executor.get_generation_provider", return_value=FakeComfyUI()):
+        with (
+            patch("services.generation_executor.get_generation_provider", return_value=FakeComfyUI()),
+            patch("services.generation_config.get_generation_engine", return_value=FakeComfyUI()),
+        ):
             failed = self.client.post(
                 f"/api/scenes/{scene_id}/generate-image",
                 params={"workflow_id": missing_model_workflow["id"]},
             )
         self.assertEqual(failed.status_code, 200)
         self.assertEqual(failed.json()["task"]["status"], "failed")
-        self.assertEqual(failed.json()["task"]["error_message"], "missing_model")
+        self.assertIn("MODEL_NOT_FOUND", failed.json()["task"]["error_message"])
+
+    def test_local_engine_registry_preflight_snapshot_and_settings_page(self):
+        workflow = self.client.post(
+            "/api/generation-workflows",
+            json={
+                "name": "Sprint16 image workflow",
+                "provider": "comfyui",
+                "workflow_type": "image_generation",
+                "status": "available",
+                "workflow_json": {"prompt": {"1": {"inputs": {"text": "{{visual_prompt}}"}}}},
+            },
+        ).json()
+        model = self.client.post(
+            "/api/model-capabilities",
+            json={
+                "name": "Sprint16 Image Model",
+                "display_name": "Sprint16 Image Model",
+                "provider": "comfyui",
+                "engine_id": "comfyui",
+                "capability": "image",
+                "model_type": "image",
+                "status": "available",
+                "enabled": True,
+                "estimated_vram_gb": None,
+                "supported_widths": [768],
+                "supported_heights": [1024],
+                "default_parameters": {"width": 768, "height": 1024},
+            },
+        ).json()
+        preset = self.client.post(
+            "/api/studio/generation/presets",
+            json={
+                "name": "sprint16_image_default",
+                "display_name": "Sprint16 Image Default",
+                "capability": "image",
+                "engine_id": "comfyui",
+                "model_profile_id": model["id"],
+                "workflow_profile_id": workflow["id"],
+                "parameters": {"width": 768, "height": 1024},
+                "enabled": True,
+                "is_default": True,
+            },
+        ).json()
+
+        item_id = self.create_pushed_item("sprint16-1", "Local engine registry needs preflight", 82, 11, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "Sprint16 local engine", "content_item_ids": [item_id]},
+        ).json()
+        self.create_topic_intelligence_analysis(package["id"])
+        self.create_prompt("editorial")
+        prompt = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        brief = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": self.valid_editorial_output("Sprint16 Engine"),
+            },
+        ).json()
+        project = self.client.post(
+            "/api/video-projects/from-brief",
+            json={"editorial_brief_id": brief["id"], "creation_mode": "general"},
+        ).json()
+        scene_id = project["scenes"][0]["id"]
+        self.approve_project_for_generation(project["id"])
+
+        class HealthyEngine:
+            def health_check(self):
+                return {
+                    "provider": "comfyui",
+                    "engine_id": "comfyui",
+                    "display_name": "ComfyUI",
+                    "capabilities": ["image"],
+                    "available": True,
+                    "status": "available",
+                    "message": "fake healthy",
+                }
+
+            def submit_job(self, workflow, context):
+                return {"provider_task_id": "sprint16-prompt"}
+
+            def get_status(self, provider_task_id):
+                return {"provider_task_id": provider_task_id, "status": "completed"}
+
+            def get_result(self, provider_task_id):
+                return {
+                    "provider_task_id": provider_task_id,
+                    "status": "completed",
+                    "assets": [{"asset_type": "image", "url": "http://127.0.0.1:8188/view?filename=sprint16.png", "metadata": {}}],
+                }
+
+        with patch("services.generation_config.get_generation_engine", return_value=HealthyEngine()):
+            preflight = self.client.post(
+                "/api/studio/generation/preflight",
+                json={
+                    "project_id": project["id"],
+                    "scene_id": scene_id,
+                    "task_type": "image_generation",
+                    "preset_id": preset["id"],
+                    "parameters": {"width": 768, "height": 1024},
+                },
+            )
+        self.assertEqual(preflight.status_code, 200)
+        self.assertIn(preflight.json()["status"], {"passed", "warning", "unknown"})
+        self.assertEqual(preflight.json()["configuration_snapshot"]["engine_id"], "comfyui")
+        self.assertEqual(preflight.json()["configuration_snapshot"]["preset_id"], preset["id"])
+
+        engines = self.client.get("/api/studio/generation/engines", params={"capability": "image"})
+        self.assertEqual(engines.status_code, 200)
+        self.assertTrue(any(row["engine_id"] == "comfyui" for row in engines.json()["items"]))
+        presets = self.client.get("/api/studio/generation/presets", params={"capability": "image"})
+        self.assertTrue(any(row["id"] == preset["id"] for row in presets.json()["items"]))
+        models = self.client.get("/api/studio/generation/models", params={"capability": "image"})
+        self.assertTrue(any(row["id"] == model["id"] for row in models.json()["items"]))
+
+        with (
+            patch("services.generation_config.get_generation_engine", return_value=HealthyEngine()),
+            patch("services.generation_executor.get_generation_provider", return_value=HealthyEngine()),
+        ):
+            generated = self.client.post(
+                f"/api/scenes/{scene_id}/generate-image",
+                params={"preset_id": preset["id"]},
+            )
+        self.assertEqual(generated.status_code, 200)
+        self.assertEqual(generated.json()["task"]["status"], "completed")
+        self.assertEqual(generated.json()["task"]["configuration_snapshot"]["preset_id"], preset["id"])
+        self.assertEqual(generated.json()["task"]["preflight_result"]["configuration_snapshot"]["engine_id"], "comfyui")
+
+        config = self.client.get(f"/api/studio/jobs/{project['id']}/generation-config")
+        self.assertEqual(config.status_code, 200)
+        self.assertEqual(config.json()["items"][0]["snapshot"]["preset_id"], preset["id"])
+
+        page = self.client.get("/generation-settings")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("生成设置", page.text)
+        self.assertIn("Sprint16 Image Default", page.text)
+        detail = self.client.get(f"/studio-jobs/{project['id']}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("生成配置与预检", detail.text)
+        self.assertIn("sprint16_image_default", detail.text)
+
+    def test_preflight_blocks_unsafe_path_and_unreachable_engine(self):
+        workflow = self.client.post(
+            "/api/generation-workflows",
+            json={
+                "name": "Unsafe workflow",
+                "provider": "comfyui",
+                "workflow_type": "image_generation",
+                "status": "available",
+                "workflow_json": {"prompt": {"1": {"inputs": {"text": "{{visual_prompt}}"}}}},
+            },
+        ).json()
+        model = self.client.post(
+            "/api/model-capabilities",
+            json={
+                "name": "Unsafe Path Model",
+                "provider": "comfyui",
+                "engine_id": "comfyui",
+                "capability": "image",
+                "model_type": "image",
+                "status": "available",
+                "checkpoint_path": "../../secret-model.safetensors",
+                "enabled": True,
+            },
+        ).json()
+        preset = self.client.post(
+            "/api/studio/generation/presets",
+            json={
+                "name": "unsafe_path_preset",
+                "capability": "image",
+                "engine_id": "comfyui",
+                "model_profile_id": model["id"],
+                "workflow_profile_id": workflow["id"],
+                "parameters": {"width": 768, "height": 1024},
+                "enabled": True,
+            },
+        ).json()
+        item_id = self.create_pushed_item("sprint16-unsafe", "Unsafe paths must be blocked", 70, 5, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "Unsafe preflight", "content_item_ids": [item_id]},
+        ).json()
+        self.create_topic_intelligence_analysis(package["id"])
+        self.create_prompt("editorial")
+        prompt = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        brief = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": self.valid_editorial_output("Unsafe Preflight"),
+            },
+        ).json()
+        project = self.client.post(
+            "/api/video-projects/from-brief",
+            json={"editorial_brief_id": brief["id"], "creation_mode": "general"},
+        ).json()
+
+        class DownEngine:
+            def health_check(self):
+                return {"engine_id": "comfyui", "available": False, "status": "unavailable", "message": "fake down"}
+
+        with patch("services.generation_config.get_generation_engine", return_value=DownEngine()):
+            preflight = self.client.post(
+                "/api/studio/generation/preflight",
+                json={
+                    "project_id": project["id"],
+                    "scene_id": project["scenes"][0]["id"],
+                    "task_type": "image_generation",
+                    "preset_id": preset["id"],
+                },
+            ).json()
+        codes = {check["code"] for check in preflight["checks"] if check["status"] == "failed"}
+        self.assertEqual(preflight["status"], "failed")
+        self.assertIn("ENGINE_UNREACHABLE", codes)
+        self.assertIn("INVALID_GENERATION_CONFIG", codes)
 
 
 if __name__ == "__main__":
