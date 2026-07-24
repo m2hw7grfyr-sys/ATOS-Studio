@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -17,9 +18,13 @@ from models.production import (
 )
 from repositories.content_items import parse_json, stable_json
 from services.generation.provider_registry import get_generation_provider
+from services.generation_steps import GenerationStep, IMAGE_GENERATION_FLOW
 from services.generation_planner import generation_context
 from services.video_production import serialize_generation_task
 from services.workflow_validator import validate_workflow
+
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -229,6 +234,117 @@ def preflight_generation_task(db: Session, task: StudioGenerationTask, workflow:
     return {"ok": True, "reason": "ok", "provider_health": health}
 
 
+def task_output(task: StudioGenerationTask) -> dict[str, Any]:
+    return parse_json(task.output_json, {}) or {}
+
+
+def save_task_output(task: StudioGenerationTask, payload: dict[str, Any]) -> None:
+    task.output_json = stable_json(payload)
+
+
+def completed_steps(task: StudioGenerationTask) -> list[str]:
+    steps = task_output(task).get("completed_steps") or []
+    return [str(step) for step in steps]
+
+
+def mark_step_started(task: StudioGenerationTask, step: str) -> None:
+    task.status = "running"
+    task.current_step = step
+    task.failed_step = ""
+    task.error_message = None
+    task.started_at = task.started_at or utc_now()
+    task.updated_at = utc_now()
+
+
+def mark_step_completed(task: StudioGenerationTask, step: str, payload: Optional[dict[str, Any]] = None) -> None:
+    output = task_output(task)
+    steps = [str(item) for item in output.get("completed_steps") or []]
+    if step not in steps:
+        steps.append(step)
+    output["completed_steps"] = steps
+    if payload:
+        output[step] = payload
+    save_task_output(task, output)
+    task.current_step = step
+    task.updated_at = utc_now()
+
+
+def mark_task_failed(task: StudioGenerationTask, step: str, error_message: str, payload: Optional[dict[str, Any]] = None) -> None:
+    output = task_output(task)
+    output["failed_step"] = step
+    if payload:
+        output[step] = payload
+    save_task_output(task, output)
+    task.status = "failed"
+    task.current_step = step
+    task.failed_step = step
+    task.finished_at = utc_now()
+    task.error_message = error_message[:1000]
+    task.updated_at = utc_now()
+
+
+def mark_task_completed(task: StudioGenerationTask) -> None:
+    now = utc_now()
+    task.status = "completed"
+    task.current_step = GenerationStep.ARCHIVE
+    task.failed_step = ""
+    task.finished_at = now
+    task.completed_at = now
+    task.updated_at = now
+
+
+def fail_task_from_exception(task: StudioGenerationTask, step: str, exc: Exception, payload: Optional[dict[str, Any]] = None) -> None:
+    logger.exception("generation task failed", extra={"task_id": task.id, "step": step})
+    mark_task_failed(task, step, str(exc) or exc.__class__.__name__, payload)
+
+
+def fail_task_from_reason(task: StudioGenerationTask, step: str, reason: str, payload: Optional[dict[str, Any]] = None) -> None:
+    logger.error("generation task failed: %s", reason, extra={"task_id": task.id, "step": step})
+    mark_task_failed(task, step, reason, payload)
+
+
+def first_step_to_run(task: StudioGenerationTask, retry_from_failed: bool = False) -> str:
+    if retry_from_failed and task.failed_step:
+        return task.failed_step
+    done = set(completed_steps(task))
+    for step in IMAGE_GENERATION_FLOW:
+        if step not in done:
+            return step
+    return GenerationStep.ARCHIVE
+
+
+def step_should_run(task: StudioGenerationTask, step: str, start_step: str) -> bool:
+    if step == start_step:
+        return True
+    if step in completed_steps(task):
+        return False
+    try:
+        return IMAGE_GENERATION_FLOW.index(step) > IMAGE_GENERATION_FLOW.index(start_step)
+    except ValueError:
+        return True
+
+
+def existing_task_assets(db: Session, task: StudioGenerationTask) -> list[StudioAsset]:
+    return db.scalars(
+        select(StudioAsset)
+        .where(StudioAsset.generation_task_id == task.id)
+        .order_by(StudioAsset.created_at.desc())
+    ).all()
+
+
+def asset_already_saved(db: Session, task: StudioGenerationTask, asset_payload: dict[str, Any]) -> bool:
+    url = str(asset_payload.get("url") or "")
+    file_path = str(asset_payload.get("file_path") or "")
+    if not url and not file_path:
+        return False
+    statement = select(StudioAsset).where(StudioAsset.generation_task_id == task.id)
+    if url:
+        statement = statement.where(StudioAsset.url == url)
+    if file_path:
+        statement = statement.where(StudioAsset.file_path == file_path)
+    return db.scalars(statement).first() is not None
+
+
 def create_scene_image_task(db: Session, scene_id: str, provider_name: str = "comfyui", workflow_id: Optional[str] = None) -> StudioGenerationTask:
     scene = db.get(StudioVideoScene, scene_id)
     if not scene:
@@ -258,76 +374,127 @@ def create_scene_image_task(db: Session, scene_id: str, provider_name: str = "co
     return task
 
 
-def run_generation_task(db: Session, task_id: str) -> dict[str, Any]:
+def run_generation_task(db: Session, task_id: str, retry_from_failed: bool = False) -> dict[str, Any]:
     task = db.get(StudioGenerationTask, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="generation task not found")
     if task.task_type != "image_generation":
         raise HTTPException(status_code=422, detail="only image_generation is executable in Sprint 10")
+    if task.status == "running":
+        raise HTTPException(status_code=409, detail="generation task is already running")
+    if task.status == "completed":
+        raise HTTPException(status_code=409, detail="completed generation task cannot be rerun")
+    if retry_from_failed and task.status != "failed":
+        raise HTTPException(status_code=409, detail="only failed generation tasks can be retried")
+    if retry_from_failed:
+        task.retry_count += 1
     provider_name = task.provider_name or task.provider or "comfyui"
     context = parse_json(task.context_json, {})
-    workflow_id = context.get("workflow_id")
-    if workflow_id:
-        workflow = db.get(StudioGenerationWorkflow, str(workflow_id))
-        if not workflow:
-            raise HTTPException(status_code=404, detail="workflow not found")
-    else:
-        workflow = enabled_workflow(db, provider_name, task.task_type)
-    preflight = preflight_generation_task(db, task, workflow)
-    if not preflight.get("ok"):
-        task.status = "failed"
-        task.finished_at = utc_now()
-        task.error_message = str(preflight.get("reason") or "preflight_failed")
-        task.output_json = stable_json({"preflight": preflight})
-        db.flush()
-        return {"task": serialize_generation_task(task), "assets": []}
-    provider = get_generation_provider(provider_name)
-    task.status = "running"
-    task.started_at = task.started_at or utc_now()
-    task.error_message = None
-    db.flush()
+    workflow: Optional[StudioGenerationWorkflow] = None
+    provider = None
+    start_step = first_step_to_run(task, retry_from_failed)
     try:
-        submitted = provider.submit_job(parse_json(workflow.workflow_json, {}), context)
-        task.provider_task_id = str(submitted.get("provider_task_id") or "")
-        status_payload = provider.get_status(task.provider_task_id)
-        result_payload = provider.get_result(task.provider_task_id)
-        assets_payload = result_payload.get("assets") or []
-        for asset_payload in assets_payload:
-            db.add(
-                StudioAsset(
-                    asset_type=str(asset_payload.get("asset_type") or "image"),
-                    file_path=str(asset_payload.get("file_path") or ""),
-                    url=str(asset_payload.get("url") or ""),
-                    provider=provider_name,
-                    generation_task_id=task.id,
-                    metadata_json=stable_json(asset_payload.get("metadata") or {}),
+        if step_should_run(task, GenerationStep.PREPARE, start_step):
+            mark_step_started(task, GenerationStep.PREPARE)
+            db.flush()
+            workflow_id = context.get("workflow_id")
+            if workflow_id:
+                workflow = db.get(StudioGenerationWorkflow, str(workflow_id))
+                if not workflow:
+                    raise HTTPException(status_code=404, detail="workflow not found")
+            else:
+                workflow = enabled_workflow(db, provider_name, task.task_type)
+            preflight = preflight_generation_task(db, task, workflow)
+            if not preflight.get("ok"):
+                fail_task_from_reason(
+                    task,
+                    GenerationStep.PREPARE,
+                    str(preflight.get("reason") or "preflight_failed"),
+                    {"preflight": preflight},
                 )
-            )
-        if not assets_payload:
-            raise RuntimeError("Workflow execution failed.")
-        task.status = "completed"
-        task.finished_at = utc_now()
-        task.output_json = stable_json(
-            {
-                "submit": submitted,
-                "status": status_payload,
-                "result": result_payload,
-                "asset_count": len(assets_payload),
-            }
-        )
+                db.flush()
+                return {"task": serialize_generation_task(task), "assets": []}
+            mark_step_completed(task, GenerationStep.PREPARE, {"preflight": preflight, "workflow_id": workflow.id})
+            db.flush()
+        else:
+            workflow_id = context.get("workflow_id") or task_output(task).get(GenerationStep.PREPARE, {}).get("workflow_id")
+            workflow = db.get(StudioGenerationWorkflow, str(workflow_id)) if workflow_id else enabled_workflow(db, provider_name, task.task_type)
+        if step_should_run(task, GenerationStep.IMAGE_GENERATION, start_step):
+            mark_step_started(task, GenerationStep.IMAGE_GENERATION)
+            db.flush()
+            existing_assets = existing_task_assets(db, task)
+            if existing_assets and retry_from_failed:
+                mark_step_completed(
+                    task,
+                    GenerationStep.IMAGE_GENERATION,
+                    {"skipped": True, "reason": "existing_asset", "asset_count": len(existing_assets)},
+                )
+            else:
+                provider = get_generation_provider(provider_name)
+                submitted = provider.submit_job(parse_json(workflow.workflow_json, {}), context)
+                task.provider_task_id = str(submitted.get("provider_task_id") or "")
+                status_payload = provider.get_status(task.provider_task_id)
+                result_payload = provider.get_result(task.provider_task_id)
+                assets_payload = result_payload.get("assets") or []
+                saved_count = 0
+                for asset_payload in assets_payload:
+                    if asset_already_saved(db, task, asset_payload):
+                        continue
+                    db.add(
+                        StudioAsset(
+                            asset_type=str(asset_payload.get("asset_type") or "image"),
+                            file_path=str(asset_payload.get("file_path") or ""),
+                            url=str(asset_payload.get("url") or ""),
+                            provider=provider_name,
+                            generation_task_id=task.id,
+                            metadata_json=stable_json(asset_payload.get("metadata") or {}),
+                        )
+                    )
+                    saved_count += 1
+                if not assets_payload and not existing_task_assets(db, task):
+                    raise RuntimeError("Workflow execution failed.")
+                mark_step_completed(
+                    task,
+                    GenerationStep.IMAGE_GENERATION,
+                    {
+                        "submit": submitted,
+                        "status": status_payload,
+                        "result": result_payload,
+                        "asset_count": len(assets_payload),
+                        "saved_asset_count": saved_count,
+                    },
+                )
+            db.flush()
+        if step_should_run(task, GenerationStep.ARCHIVE, start_step):
+            mark_step_started(task, GenerationStep.ARCHIVE)
+            db.flush()
+            if not existing_task_assets(db, task):
+                raise RuntimeError("Workflow execution failed.")
+            mark_step_completed(task, GenerationStep.ARCHIVE, {"asset_count": len(existing_task_assets(db, task))})
+            mark_task_completed(task)
         db.flush()
     except Exception as exc:
-        task.status = "failed"
-        task.finished_at = utc_now()
-        task.error_message = str(exc)[:1000]
-        task.output_json = stable_json({"error": task.error_message})
+        if isinstance(exc, HTTPException):
+            if exc.status_code in {404, 409, 422} and not task.current_step:
+                raise
+            message = str(exc.detail)
+        else:
+            message = str(exc)
+        fail_task_from_exception(task, task.current_step or start_step, exc, {"error": message})
         db.flush()
-    assets = db.scalars(
-        select(StudioAsset)
-        .where(StudioAsset.generation_task_id == task.id)
-        .order_by(StudioAsset.created_at.desc())
-    ).all()
+    assets = existing_task_assets(db, task)
     return {"task": serialize_generation_task(task), "assets": [serialize_asset(asset) for asset in assets]}
+
+
+def retry_generation_task(db: Session, task_id: str) -> dict[str, Any]:
+    task = db.get(StudioGenerationTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="generation task not found")
+    if task.status != "failed":
+        raise HTTPException(status_code=409, detail="only failed generation tasks can be retried")
+    if not task.failed_step:
+        raise HTTPException(status_code=409, detail="failed_step is missing")
+    return run_generation_task(db, task_id, retry_from_failed=True)
 
 
 def scene_assets(db: Session, scene_id: str) -> list[dict[str, Any]]:

@@ -14,7 +14,7 @@ from config.settings import get_settings
 from config.settings import Settings
 from database import Base
 from models.schemas import AtosContentItem
-from models.production import StudioGenerationWorkflow, StudioVideoScene
+from models.production import StudioAsset, StudioGenerationTask, StudioGenerationWorkflow, StudioVideoScene
 from repositories.content_items import stable_json
 from services.ai.providers.llm_provider import LLMGeneration, LLMHealth
 from services.generation.providers.comfyui.provider import ComfyUIProvider
@@ -108,6 +108,13 @@ class StudioAppTests(unittest.TestCase):
         self.assertIn("title", content)
         self.assertIn("image_prompt", content)
         self.assertIn("on_screen_text", content)
+
+    def test_generation_retry_migration_exists(self):
+        with open("migrations/versions/0013_add_generation_task_retry_fields.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("current_step", content)
+        self.assertIn("failed_step", content)
+        self.assertIn("completed_at", content)
 
 
 class ContentPoolTests(unittest.TestCase):
@@ -1099,6 +1106,175 @@ class ContentPoolTests(unittest.TestCase):
             scenes = db.query(StudioVideoScene).filter_by(video_project_id=project_id).order_by(StudioVideoScene.scene_number.asc()).all()
             self.assertEqual(len(scenes), 2)
             self.assertEqual([scene.scene_number for scene in scenes], [1, 2])
+
+    def test_generation_task_failure_retry_and_queue_ui(self):
+        item_id = self.create_pushed_item("retry-1", "Retry image generation scene", 84, 13, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "Retry scene", "content_item_ids": [item_id]},
+        ).json()
+        self.create_topic_intelligence_analysis(package["id"])
+        self.create_prompt("editorial")
+        prompt = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        brief = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": self.valid_editorial_output("Retry Image Scene"),
+            },
+        ).json()
+        project = self.client.post(
+            "/api/video-projects/from-brief",
+            json={"editorial_brief_id": brief["id"], "creation_mode": "general"},
+        ).json()
+        scene_id = project["scenes"][0]["id"]
+        with self.Session() as db:
+            db.add(
+                StudioGenerationWorkflow(
+                    id="workflow-retry-comfyui",
+                    name="retry workflow",
+                    description="retry workflow",
+                    provider="comfyui",
+                    workflow_type="image_generation",
+                    status="available",
+                    workflow_json=stable_json({"prompt": {"1": {"inputs": {"text": "{{visual_prompt}}"}}}}),
+                    tags_json="[]",
+                    required_models_json="[]",
+                    test_result_json="{}",
+                    version="test",
+                    enabled=True,
+                    created_by="test",
+                )
+            )
+            db.commit()
+
+        task = self.client.post(f"/api/scenes/{scene_id}/generate-image", params={"run_now": False}).json()["task"]
+        counters = {"health": 0, "submit": 0, "status": 0}
+
+        class FailsDuringStatus:
+            def health_check(self):
+                counters["health"] += 1
+                return {"available": True, "status": "available"}
+
+            def submit_job(self, workflow, context):
+                counters["submit"] += 1
+                return {"provider_task_id": "retry-first"}
+
+            def get_status(self, provider_task_id):
+                counters["status"] += 1
+                raise RuntimeError("status polling failed")
+
+            def get_result(self, provider_task_id):
+                raise AssertionError("result should not be called after status failure")
+
+        with patch("services.generation_executor.get_generation_provider", return_value=FailsDuringStatus()):
+            failed = self.client.post(f"/api/generation-tasks/{task['id']}/run")
+        self.assertEqual(failed.status_code, 200)
+        failed_task = failed.json()["task"]
+        self.assertEqual(failed_task["status"], "failed")
+        self.assertEqual(failed_task["current_step"], "image_generation")
+        self.assertEqual(failed_task["failed_step"], "image_generation")
+        self.assertIn("status polling failed", failed_task["error_message"])
+        self.assertEqual(failed_task["retry_count"], 0)
+        self.assertEqual(failed_task["output"]["completed_steps"], ["prepare"])
+        self.assertEqual(counters["health"], 1)
+
+        class SucceedsOnRetry:
+            def health_check(self):
+                counters["health"] += 1
+                return {"available": True, "status": "available"}
+
+            def submit_job(self, workflow, context):
+                counters["submit"] += 1
+                return {"provider_task_id": "retry-second"}
+
+            def get_status(self, provider_task_id):
+                counters["status"] += 1
+                return {"provider_task_id": provider_task_id, "status": "completed"}
+
+            def get_result(self, provider_task_id):
+                return {
+                    "provider_task_id": provider_task_id,
+                    "status": "completed",
+                    "assets": [{"asset_type": "image", "url": "http://127.0.0.1:8188/view?filename=retry.png", "metadata": {}}],
+                }
+
+        with patch("services.generation_executor.get_generation_provider", return_value=SucceedsOnRetry()):
+            retried = self.client.post(f"/api/studio/jobs/{task['id']}/retry")
+        self.assertEqual(retried.status_code, 200)
+        retried_task = retried.json()["task"]
+        self.assertEqual(retried_task["status"], "completed")
+        self.assertEqual(retried_task["retry_count"], 1)
+        self.assertEqual(retried_task["failed_step"], "")
+        self.assertEqual(retried_task["current_step"], "archive")
+        self.assertIsNotNone(retried_task["completed_at"])
+        self.assertEqual(counters["health"], 1)
+        self.assertEqual(counters["submit"], 2)
+        self.assertIn("archive", retried_task["output"]["completed_steps"])
+
+        completed_retry = self.client.post(f"/api/studio/jobs/{task['id']}/retry")
+        self.assertEqual(completed_retry.status_code, 409)
+
+        with self.Session() as db:
+            row = db.get(StudioGenerationTask, task["id"])
+            row.status = "running"
+            row.failed_step = ""
+            db.commit()
+        running_run = self.client.post(f"/api/generation-tasks/{task['id']}/run")
+        self.assertEqual(running_run.status_code, 409)
+
+        with self.Session() as db:
+            row = db.get(StudioGenerationTask, task["id"])
+            row.status = "failed"
+            row.current_step = "archive"
+            row.failed_step = "archive"
+            row.retry_count = 1
+            row.output_json = stable_json({"completed_steps": ["prepare", "image_generation"]})
+            db.add(
+                StudioAsset(
+                    asset_type="image",
+                    file_path="",
+                    url="http://127.0.0.1:8188/view?filename=existing.png",
+                    provider="comfyui",
+                    generation_task_id=task["id"],
+                    metadata_json="{}",
+                )
+            )
+            db.commit()
+
+        class MustNotRunProvider:
+            def health_check(self):
+                raise AssertionError("prepare should not repeat")
+
+            def submit_job(self, workflow, context):
+                raise AssertionError("image_generation should not repeat")
+
+        with patch("services.generation_executor.get_generation_provider", return_value=MustNotRunProvider()):
+            archive_retry = self.client.post(f"/api/studio/jobs/{task['id']}/retry")
+        self.assertEqual(archive_retry.status_code, 200)
+        self.assertEqual(archive_retry.json()["task"]["status"], "completed")
+        self.assertEqual(archive_retry.json()["task"]["retry_count"], 2)
+        self.assertEqual(len(archive_retry.json()["assets"]), 2)
+        with self.Session() as db:
+            asset_count = db.query(StudioAsset).filter_by(generation_task_id=task["id"]).count()
+        self.assertEqual(asset_count, 2)
+
+        with self.Session() as db:
+            row = db.get(StudioGenerationTask, task["id"])
+            row.status = "failed"
+            row.current_step = "image_generation"
+            row.failed_step = "image_generation"
+            row.error_message = "manual visible failure"
+            db.commit()
+        queue_page = self.client.get("/generation-queue", params={"status": "failed"})
+        self.assertEqual(queue_page.status_code, 200)
+        self.assertIn("当前步骤", queue_page.text)
+        self.assertIn("失败步骤", queue_page.text)
+        self.assertIn("重试次数", queue_page.text)
+        self.assertIn("manual visible failure", queue_page.text)
+        self.assertIn("从失败步骤重试", queue_page.text)
 
     def test_comfyui_image_generation_task_asset_and_page(self):
         item_id = self.create_pushed_item("comfyui-1", "A quiet desk scene for ADHD planning", 88, 14, "low")

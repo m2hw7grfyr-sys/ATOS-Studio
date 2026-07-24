@@ -78,6 +78,7 @@ from services.generation_executor import (
     list_workflows,
     list_model_capabilities,
     run_generation_task,
+    retry_generation_task,
     scene_assets,
     serialize_model_capability,
     serialize_workflow,
@@ -1992,6 +1993,20 @@ def run_generation_task_api(task_id: str, db: Session = Depends(get_db)) -> dict
     return payload
 
 
+@app.post("/api/studio/jobs/{job_id}/retry")
+def retry_studio_job_api(job_id: str, db: Session = Depends(get_db)) -> dict:
+    payload = retry_generation_task(db, job_id)
+    db.commit()
+    return payload
+
+
+@app.post("/api/generation-tasks/{task_id}/retry")
+def retry_generation_task_api(task_id: str, db: Session = Depends(get_db)) -> dict:
+    payload = retry_generation_task(db, task_id)
+    db.commit()
+    return payload
+
+
 @app.get("/api/generation-tasks/{task_id}/assets")
 def generation_task_assets_api(task_id: str, db: Session = Depends(get_db)) -> dict:
     return {"items": task_assets(db, task_id)}
@@ -2385,7 +2400,7 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
         )
         + "</div>"
         + (
-            "<table><thead><tr><th>Task ID</th><th>类型</th><th>Provider</th><th>Provider Task ID</th><th>状态</th><th>Asset状态</th><th>依赖</th></tr></thead><tbody>"
+            "<table><thead><tr><th>Task ID</th><th>类型</th><th>Provider</th><th>Provider Task ID</th><th>状态</th><th>当前步骤</th><th>失败步骤</th><th>重试次数</th><th>Asset状态</th><th>依赖</th></tr></thead><tbody>"
             + "".join(
                 "<tr>"
                 f'<td>{escape(task["id"])}</td>'
@@ -2393,6 +2408,9 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
                 f'<td>{escape(task.get("provider_name") or task.get("provider") or "")}</td>'
                 f'<td>{escape(task.get("provider_task_id") or "")}</td>'
                 f'<td>{escape(task["status"])}</td>'
+                f'<td>{escape(task.get("current_step") or "")}</td>'
+                f'<td>{escape(task.get("failed_step") or "")}</td>'
+                f'<td>{escape(str(task.get("retry_count") or 0))}</td>'
                 f'<td>{escape("已保存" if task_assets(db, task["id"]) else "暂无")}</td>'
                 f'<td>{escape(task.get("depends_on_task_id") or "")}</td>'
                 "</tr>"
@@ -2601,6 +2619,8 @@ def inspiration() -> HTMLResponse:
 
 @app.get("/generation-queue", response_class=HTMLResponse)
 def generation_queue(
+    msg: str = "",
+    level: str = "ok",
     status_filter: str = Query(default="", alias="status"),
     task_type: str = "",
     provider: str = "",
@@ -2613,6 +2633,13 @@ def generation_queue(
         project = db.get(StudioVideoProject, task["video_project_id"])
         assets = task_assets(db, task["id"])
         asset_status = f'{len(assets)} asset' if len(assets) == 1 else f'{len(assets)} assets'
+        retry_action = (
+            f'<form method="post" action="/generation-queue/{escape(task["id"])}/retry-form">'
+            '<button class="button secondary mini" type="submit" onclick="this.disabled=true;this.textContent=\'重试中...\';this.form.submit();">从失败步骤重试</button>'
+            "</form>"
+            if task["status"] == "failed"
+            else ""
+        )
         rows.append(
             "<tr>"
             f'<td>{escape(task["id"])}</td>'
@@ -2621,14 +2648,18 @@ def generation_queue(
             f'<td>{escape(task.get("provider_name") or task.get("provider") or "")}</td>'
             f'<td>{escape(task.get("provider_task_id") or "")}</td>'
             f'<td>{escape(task["status"])}</td>'
+            f'<td>{escape(task.get("current_step") or "")}</td>'
+            f'<td>{escape(task.get("failed_step") or "")}</td>'
             f'<td>{escape(asset_status)}</td>'
+            f'<td>{escape(str(task.get("retry_count") or 0))}</td>'
             f'<td>{escape(task.get("error_message") or "")}</td>'
             f'<td>{escape(task.get("created_at") or "")}</td>'
             f'<td>{escape(task.get("updated_at") or "")}</td>'
+            f'<td>{retry_action}</td>'
             "</tr>"
         )
     table = (
-        "<table><thead><tr><th>Task ID</th><th>项目</th><th>类型</th><th>Provider</th><th>Provider Task ID</th><th>状态</th><th>Asset状态</th><th>错误</th><th>创建时间</th><th>更新时间</th></tr></thead><tbody>"
+        "<table><thead><tr><th>Task ID</th><th>项目</th><th>类型</th><th>Provider</th><th>Provider Task ID</th><th>状态</th><th>当前步骤</th><th>失败步骤</th><th>Asset状态</th><th>重试次数</th><th>错误</th><th>创建时间</th><th>更新时间</th><th>操作</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
         if tasks
@@ -2644,6 +2675,7 @@ def generation_queue(
     body = f"""
       <h1>生成队列</h1>
       <p class="subtitle">Generation Queue：只负责拆分和排队。当前 Sprint 不连接视频模型，不执行生成。</p>
+      {message_html(msg, level)}
       <section class="panel">
         <form method="get" action="/generation-queue" class="toolbar">
           <label>状态<br><input class="field" name="status" value="{escape(status_filter)}" placeholder="queued"></label>
@@ -2662,6 +2694,20 @@ def generation_queue(
       </section>
     """
     return render_shell("generation-queue", "生成队列", body)
+
+
+@app.post("/generation-queue/{task_id}/retry-form")
+async def generation_task_retry_form(task_id: str, db: Session = Depends(get_db)):
+    try:
+        retry_generation_task(db, task_id)
+        db.commit()
+        return RedirectResponse("/generation-queue?msg=任务已从失败步骤重试", status_code=303)
+    except HTTPException as exc:
+        db.rollback()
+        return RedirectResponse(f"/generation-queue?status=failed&level=warn&msg={quote(str(exc.detail))}", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/generation-queue?status=failed&level=warn&msg={quote(str(exc))}", status_code=303)
 
 
 @app.get("/workflows", response_class=HTMLResponse)
