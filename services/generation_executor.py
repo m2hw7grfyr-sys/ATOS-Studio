@@ -283,6 +283,38 @@ def mark_task_failed(task: StudioGenerationTask, step: str, error_message: str, 
     task.updated_at = utc_now()
 
 
+def mark_project_failed(db: Session, task: StudioGenerationTask) -> None:
+    project = db.get(StudioVideoProject, task.video_project_id)
+    if project and project.status != "completed":
+        project.status = "failed"
+        project.updated_at = utc_now()
+
+
+def mark_project_running(db: Session, task: StudioGenerationTask) -> None:
+    project = db.get(StudioVideoProject, task.video_project_id)
+    if project and project.status not in {"completed"}:
+        project.status = "running"
+        project.updated_at = utc_now()
+
+
+def sync_project_completion(db: Session, task: StudioGenerationTask) -> None:
+    project = db.get(StudioVideoProject, task.video_project_id)
+    if not project:
+        return
+    statuses = list(
+        db.scalars(
+            select(StudioGenerationTask.status).where(StudioGenerationTask.video_project_id == project.id)
+        ).all()
+    )
+    if statuses and all(status == "completed" for status in statuses):
+        project.status = "completed"
+    elif "failed" in statuses:
+        project.status = "failed"
+    else:
+        project.status = "running"
+    project.updated_at = utc_now()
+
+
 def mark_task_completed(task: StudioGenerationTask) -> None:
     now = utc_now()
     task.status = "completed"
@@ -396,6 +428,7 @@ def run_generation_task(db: Session, task_id: str, retry_from_failed: bool = Fal
     try:
         if step_should_run(task, GenerationStep.PREPARE, start_step):
             mark_step_started(task, GenerationStep.PREPARE)
+            mark_project_running(db, task)
             db.flush()
             workflow_id = context.get("workflow_id")
             if workflow_id:
@@ -412,6 +445,7 @@ def run_generation_task(db: Session, task_id: str, retry_from_failed: bool = Fal
                     str(preflight.get("reason") or "preflight_failed"),
                     {"preflight": preflight},
                 )
+                mark_project_failed(db, task)
                 db.flush()
                 return {"task": serialize_generation_task(task), "assets": []}
             mark_step_completed(task, GenerationStep.PREPARE, {"preflight": preflight, "workflow_id": workflow.id})
@@ -421,6 +455,7 @@ def run_generation_task(db: Session, task_id: str, retry_from_failed: bool = Fal
             workflow = db.get(StudioGenerationWorkflow, str(workflow_id)) if workflow_id else enabled_workflow(db, provider_name, task.task_type)
         if step_should_run(task, GenerationStep.IMAGE_GENERATION, start_step):
             mark_step_started(task, GenerationStep.IMAGE_GENERATION)
+            mark_project_running(db, task)
             db.flush()
             existing_assets = existing_task_assets(db, task)
             if existing_assets and retry_from_failed:
@@ -467,11 +502,13 @@ def run_generation_task(db: Session, task_id: str, retry_from_failed: bool = Fal
             db.flush()
         if step_should_run(task, GenerationStep.ARCHIVE, start_step):
             mark_step_started(task, GenerationStep.ARCHIVE)
+            mark_project_running(db, task)
             db.flush()
             if not existing_task_assets(db, task):
                 raise RuntimeError("Workflow execution failed.")
             mark_step_completed(task, GenerationStep.ARCHIVE, {"asset_count": len(existing_task_assets(db, task))})
             mark_task_completed(task)
+            sync_project_completion(db, task)
         db.flush()
     except Exception as exc:
         if isinstance(exc, HTTPException):
@@ -481,6 +518,7 @@ def run_generation_task(db: Session, task_id: str, retry_from_failed: bool = Fal
         else:
             message = str(exc)
         fail_task_from_exception(task, task.current_step or start_step, exc, {"error": message})
+        mark_project_failed(db, task)
         db.flush()
     assets = existing_task_assets(db, task)
     return {"task": serialize_generation_task(task), "assets": [serialize_asset(asset) for asset in assets]}

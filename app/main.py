@@ -96,6 +96,17 @@ from services.creator_workspace import (
     update_editorial_workspace,
     update_scene,
 )
+from services.studio_job_service import (
+    approve_job,
+    get_studio_job,
+    list_studio_jobs,
+    parse_studio_job,
+    reject_job,
+    save_editorial_json,
+    start_job_generation,
+    submit_job_review,
+    create_reviewed_scene_image_task,
+)
 from services.topic_intelligence_service import TOPIC_INTELLIGENCE_JOB_TYPE
 from services.topic_packages import (
     add_items_to_topic_package,
@@ -147,6 +158,7 @@ NAV_ITEMS = [
     ("gpt-director", "/gpt-director", "GPT编导"),
     ("accounts", "/accounts", "账号管理"),
     ("video-projects", "/video-projects", "视频项目"),
+    ("studio-jobs", "/studio-jobs", "任务中心"),
     ("generation-queue", "/generation-queue", "生成队列"),
     ("workflows", "/workflows", "Workflow管理"),
     ("assets", "/assets", "素材库"),
@@ -159,6 +171,7 @@ PLACEHOLDER_PAGES = {
     "video-projects": "视频项目",
     "gpt-director": "GPT编导",
     "accounts": "账号管理",
+    "studio-jobs": "任务中心",
     "generation-queue": "生成队列",
     "workflows": "Workflow管理",
     "assets": "素材库",
@@ -1896,9 +1909,66 @@ def create_video_project_from_brief_api(payload: dict = Body(...), db: Session =
 
 @app.post("/api/video-projects/{project_id}/generation-plan")
 def create_generation_plan_api(project_id: str, db: Session = Depends(get_db)) -> dict:
-    payload = create_generation_plan(db, project_id)
+    payload = start_job_generation(db, project_id)
     db.commit()
     return payload
+
+
+@app.get("/api/studio/jobs")
+def studio_jobs_api(
+    status_filter: str = Query(default="", alias="status"),
+    sort_by: str = "updated_at",
+    sort_order: str = "desc",
+    db: Session = Depends(get_db),
+) -> dict:
+    return {"items": list_studio_jobs(db, status_filter, sort_by, sort_order)}
+
+
+@app.get("/api/studio/jobs/{job_id}")
+def studio_job_detail_api(job_id: str, db: Session = Depends(get_db)) -> dict:
+    return get_studio_job(db, job_id)
+
+
+@app.put("/api/studio/jobs/{job_id}/editorial-json")
+def studio_job_editorial_json_api(job_id: str, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    row = save_editorial_json(db, job_id, payload.get("editorial_json") if "editorial_json" in payload else payload)
+    db.commit()
+    return row
+
+
+@app.post("/api/studio/jobs/{job_id}/parse")
+def studio_job_parse_api(job_id: str, db: Session = Depends(get_db)) -> dict:
+    row = parse_studio_job(db, job_id)
+    db.commit()
+    return row
+
+
+@app.post("/api/studio/jobs/{job_id}/submit-review")
+def studio_job_submit_review_api(job_id: str, db: Session = Depends(get_db)) -> dict:
+    row = submit_job_review(db, job_id)
+    db.commit()
+    return row
+
+
+@app.post("/api/studio/jobs/{job_id}/approve")
+def studio_job_approve_api(job_id: str, db: Session = Depends(get_db)) -> dict:
+    row = approve_job(db, job_id)
+    db.commit()
+    return row
+
+
+@app.post("/api/studio/jobs/{job_id}/reject")
+def studio_job_reject_api(job_id: str, payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    row = reject_job(db, job_id, str(payload.get("review_note") or ""))
+    db.commit()
+    return row
+
+
+@app.post("/api/studio/jobs/{job_id}/start")
+def studio_job_start_api(job_id: str, db: Session = Depends(get_db)) -> dict:
+    row = start_job_generation(db, job_id)
+    db.commit()
+    return row
 
 
 @app.get("/api/generation-tasks")
@@ -1977,7 +2047,7 @@ def update_model_capability_api(model_id: str, payload: dict = Body(...), db: Se
 
 @app.post("/api/scenes/{scene_id}/generate-image")
 def create_scene_image_task_api(scene_id: str, run_now: bool = True, workflow_id: str = "", db: Session = Depends(get_db)) -> dict:
-    task = create_scene_image_task(db, scene_id, "comfyui", workflow_id or None)
+    task = create_reviewed_scene_image_task(db, scene_id, "comfyui", workflow_id or None)
     if run_now:
         payload = run_generation_task(db, task.id)
     else:
@@ -2205,6 +2275,241 @@ def video_projects(msg: str = "", level: str = "ok", status_filter: str = Query(
       <section class="panel">{table}</section>
     """
     return render_shell("video-projects", "视频项目", body)
+
+
+@app.get("/studio-jobs", response_class=HTMLResponse)
+def studio_jobs_page(
+    msg: str = "",
+    level: str = "ok",
+    status_filter: str = Query(default="", alias="status"),
+    sort_by: str = "updated_at",
+    sort_order: str = "desc",
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    jobs = list_studio_jobs(db, status_filter, sort_by, sort_order)
+    status_options = [
+        ("", "全部"),
+        ("draft", "待编辑"),
+        ("pending_review", "待审核"),
+        ("approved", "审核通过"),
+        ("running", "生成中"),
+        ("completed", "已完成"),
+        ("failed", "失败"),
+    ]
+    options_html = "".join(
+        f'<option value="{escape(value)}" {"selected" if value == status_filter else ""}>{escape(label)}</option>'
+        for value, label in status_options
+    )
+    sort_options = "".join(
+        f'<option value="{value}" {"selected" if value == sort_by else ""}>{label}</option>'
+        for value, label in [("updated_at", "按更新时间"), ("created_at", "按创建时间")]
+    )
+    order_options = "".join(
+        f'<option value="{value}" {"selected" if value == sort_order else ""}>{label}</option>'
+        for value, label in [("desc", "倒序"), ("asc", "正序")]
+    )
+    rows = "".join(
+        "<tr>"
+        f'<td><a href="/studio-jobs/{escape(job["id"])}">{escape(job["title"])}</a></td>'
+        f'<td>{escape(job.get("source_title") or "")}</td>'
+        f'<td>{escape(job.get("created_at") or "")}</td>'
+        f'<td>{escape(job.get("updated_at") or "")}</td>'
+        f'<td>{escape(job.get("status") or "")}</td>'
+        f'<td>{escape(job.get("current_step") or "")}</td>'
+        f'<td>{escape(job.get("review_status") or "")}</td>'
+        f'<td>{escape(job.get("generation_progress") or "")}</td>'
+        f'<td>{escape(str(job.get("retry_count") or 0))}</td>'
+        f'<td>{escape(job.get("final_output_status") or "")}</td>'
+        f'<td><a class="button secondary mini" href="/studio-jobs/{escape(job["id"])}">详情</a></td>'
+        "</tr>"
+        for job in jobs
+    )
+    table = (
+        "<table><thead><tr><th>任务标题</th><th>内容来源</th><th>创建时间</th><th>更新时间</th><th>当前状态</th><th>当前步骤</th><th>审核状态</th><th>生成进度</th><th>重试次数</th><th>最终输出状态</th><th>操作</th></tr></thead><tbody>"
+        + rows
+        + "</tbody></table>"
+        if jobs
+        else '<div class="placeholder">暂无任务。请先从 GPT 编导创建视频项目。</div>'
+    )
+    body = f"""
+      <h1>任务控制中心</h1>
+      <p class="subtitle">统一查看 Studio 任务、审核状态、生成进度和失败重试入口。</p>
+      {message_html(msg, level)}
+      <section class="panel">
+        <form method="get" action="/studio-jobs" class="toolbar">
+          <label>状态<br><select class="field" name="status">{options_html}</select></label>
+          <label>排序<br><select class="field" name="sort_by">{sort_options}</select></label>
+          <label>顺序<br><select class="field" name="sort_order">{order_options}</select></label>
+          <button class="button secondary" type="submit">刷新任务状态</button>
+        </form>
+      </section>
+      <section class="panel">{table}</section>
+    """
+    return render_shell("studio-jobs", "任务控制中心", body)
+
+
+def job_action_buttons(job: dict) -> str:
+    job_id = escape(job["id"])
+    review_status = job.get("review_status")
+    status_value = job.get("status")
+    buttons = []
+    if review_status in {"draft", "rejected"}:
+        buttons.extend(
+            [
+                f'<form method="post" action="/studio-jobs/{job_id}/parse-form"><button class="button secondary" type="submit" onclick="this.disabled=true;this.textContent=\'解析中...\';this.form.submit();">重新解析</button></form>',
+                f'<form method="post" action="/studio-jobs/{job_id}/submit-review-form" onsubmit="return confirm(\'确认提交审核？\')"><button class="button" type="submit">提交审核</button></form>',
+            ]
+        )
+    if review_status == "pending_review":
+        buttons.extend(
+            [
+                f'<form method="post" action="/studio-jobs/{job_id}/approve-form" onsubmit="return confirm(\'确认审核通过？\')"><button class="button" type="submit">审核通过</button></form>',
+                f'<form method="post" action="/studio-jobs/{job_id}/reject-form" class="toolbar"><input class="field" name="review_note" placeholder="退回备注"><button class="button danger" type="submit">退回修改</button></form>',
+            ]
+        )
+    if review_status == "approved" and status_value not in {"running", "completed"}:
+        buttons.append(
+            f'<form method="post" action="/studio-jobs/{job_id}/start-form" onsubmit="return confirm(\'确认开始生成？\')"><button class="button" type="submit">开始生成</button></form>'
+        )
+    if status_value == "completed":
+        buttons.append('<a class="button secondary" href="#outputs">查看结果</a>')
+    return '<div class="actions">' + "".join(buttons) + "</div>"
+
+
+def studio_job_source_table(source_items: list[dict]) -> str:
+    if not source_items:
+        return '<div class="placeholder">暂无 ATOS 来源内容。</div>'
+    rows = []
+    for item in source_items:
+        url = item.get("source_url") or ""
+        link = f'<a href="{escape(url)}">打开</a>' if url else ""
+        rows.append(
+            "<tr>"
+            f'<td>{escape(item.get("title") or "")}</td>'
+            f'<td>{escape(item.get("source_platform") or "")}</td>'
+            f'<td>{escape((item.get("body") or "")[:500])}</td>'
+            f"<td>{link}</td>"
+            f'<td><details><summary>查看</summary><pre>{escape(json.dumps(item.get("metadata") or {}, ensure_ascii=False, indent=2))}</pre></details></td>'
+            "</tr>"
+        )
+    return (
+        "<table><thead><tr><th>标题</th><th>平台</th><th>正文</th><th>链接</th><th>元数据</th></tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table>"
+    )
+
+
+def studio_job_scene_table(scenes: list[dict]) -> str:
+    if not scenes:
+        return '<div class="placeholder">暂无解析后的 Scene。</div>'
+    rows = "".join(
+        "<tr>"
+        f'<td>{escape(str(scene.get("scene_number") or ""))}</td>'
+        f'<td>{escape(scene.get("voiceover") or "")}</td>'
+        f'<td>{escape(scene.get("visual_description") or scene.get("visual_prompt") or "")}</td>'
+        f'<td>{escape(scene.get("image_prompt") or scene.get("visual_prompt") or "")}</td>'
+        f'<td>{escape(scene.get("video_prompt") or "")}</td>'
+        f'<td>{escape(str(scene.get("duration") or ""))}</td>'
+        f'<td>{escape(scene.get("on_screen_text") or scene.get("subtitle") or "")}</td>'
+        f'<td>{escape(scene.get("status") or "")}</td>'
+        "</tr>"
+        for scene in scenes
+    )
+    return (
+        "<table><thead><tr><th>#</th><th>旁白文本</th><th>画面描述</th><th>图片提示词</th><th>视频提示词</th><th>预计时长</th><th>字幕文本</th><th>生成状态</th></tr></thead><tbody>"
+        + rows
+        + "</tbody></table>"
+    )
+
+
+def studio_job_task_table(tasks: list[dict]) -> str:
+    if not tasks:
+        return '<div class="placeholder">暂无生成任务。</div>'
+    rows = ""
+    for task in tasks:
+        retry = (
+            f'<form method="post" action="/generation-queue/{escape(task.get("id") or "")}/retry-form">'
+            '<button class="button secondary mini" type="submit">从失败步骤重试</button></form>'
+            if task.get("status") == "failed"
+            else ""
+        )
+        rows += (
+            "<tr>"
+            f'<td>{escape(task.get("id") or "")}</td>'
+            f'<td>{escape(task.get("task_type") or "")}</td>'
+            f'<td>{escape(task.get("status") or "")}</td>'
+            f'<td>{escape(task.get("current_step") or "")}</td>'
+            f'<td>{escape(task.get("failed_step") or "")}</td>'
+            f'<td>{escape(task.get("error_message") or "")}</td>'
+            f'<td>{escape(str(task.get("retry_count") or 0))}</td>'
+            f"<td>{retry}</td>"
+            "</tr>"
+        )
+    return (
+        "<table><thead><tr><th>Task</th><th>类型</th><th>状态</th><th>当前步骤</th><th>失败步骤</th><th>错误</th><th>重试次数</th><th>操作</th></tr></thead><tbody>"
+        + rows
+        + "</tbody></table>"
+    )
+
+
+@app.get("/studio-jobs/{job_id}", response_class=HTMLResponse)
+def studio_job_detail_page(job_id: str, msg: str = "", level: str = "ok", db: Session = Depends(get_db)) -> HTMLResponse:
+    job = get_studio_job(db, job_id)
+    package = job.get("topic_package") or {}
+    body = f"""
+      <h1>{escape(job["title"])}</h1>
+      <p class="subtitle"><a href="/studio-jobs">返回任务控制中心</a> · <a href="/video-projects/{escape(job_id)}">打开 Creator Workspace</a></p>
+      {message_html(msg, level)}
+      <section class="panel">
+        <h2>基础信息</h2>
+        <div class="detail-grid">
+          <div>任务 ID</div><div>{escape(job["id"])}</div>
+          <div>标题</div><div>{escape(job["title"])}</div>
+          <div>创建时间</div><div>{escape(job.get("created_at") or "")}</div>
+          <div>更新时间</div><div>{escape(job.get("updated_at") or "")}</div>
+          <div>任务状态</div><div>{escape(job.get("status") or "")}</div>
+          <div>审核状态</div><div>{escape(job.get("review_status") or "")}</div>
+          <div>当前步骤</div><div>{escape(job.get("current_step") or "")}</div>
+          <div>错误信息</div><div>{escape(job.get("editorial_parse_error") or "")}</div>
+          <div>重试次数</div><div>{escape(str(job.get("retry_count") or 0))}</div>
+          <div>审核备注</div><div>{escape(job.get("review_note") or "")}</div>
+        </div>
+        {job_action_buttons(job)}
+      </section>
+      <section class="panel">
+        <h2>ATOS 来源内容</h2>
+        <div class="detail-grid">
+          <div>主题</div><div>{escape(package.get("title") or "")}</div>
+          <div>聚类或主题信息</div><div>{escape(package.get("summary") or "")}</div>
+        </div>
+        {studio_job_source_table(job.get("source_items") or [])}
+      </section>
+      <section class="panel">
+        <h2>GPT 编辑内容</h2>
+        <form id="job-json-form" method="post" action="/studio-jobs/{escape(job_id)}/save-json-form">
+          <textarea class="field" style="width:100%; min-height:260px;" name="editorial_json">{escape(job.get("editorial_json") or "{}")}</textarea>
+          <div class="toolbar">
+            <button class="button" type="submit" onclick="this.disabled=true;this.textContent='保存中...';this.form.submit();">保存 JSON</button>
+            <button class="button secondary" type="button" onclick="copyTextById('job-json-copy', this)">复制 JSON</button>
+          </div>
+        </form>
+        <textarea id="job-json-copy" class="copy-source">{escape(job.get("editorial_json") or "{}")}</textarea>
+        <details><summary>格式化预览</summary><pre>{escape(json.dumps(job.get("editorial_json_parsed") or {}, ensure_ascii=False, indent=2))}</pre></details>
+      </section>
+      <section class="panel">
+        <h2>Scene 预览</h2>
+        {studio_job_scene_table(job.get("scenes") or [])}
+      </section>
+      <section class="panel">
+        <h2>生成状态</h2>
+        {studio_job_task_table(job.get("generation_tasks") or [])}
+      </section>
+      <section class="panel" id="outputs">
+        <h2>生成结果</h2>
+        <div class="placeholder">暂无最终输出。生成完成后这里会显示封面、视频、音频、字幕或安全下载入口。</div>
+      </section>
+    """
+    return render_shell("studio-jobs", "任务详情", body)
 
 
 def latest_topic_intelligence_result(db: Session, topic_package_id: str) -> dict:
@@ -2500,6 +2805,92 @@ async def video_project_editorial_form(project_id: str, request: Request, db: Se
         return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
 
 
+@app.post("/studio-jobs/{job_id}/save-json-form")
+async def studio_job_save_json_form(job_id: str, request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    try:
+        save_editorial_json(db, job_id, form.get("editorial_json", "{}"))
+        db.commit()
+        return RedirectResponse(f"/studio-jobs/{job_id}?msg=GPT JSON 已保存", status_code=303)
+    except HTTPException as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc.detail))}", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/studio-jobs/{job_id}/parse-form")
+async def studio_job_parse_form(job_id: str, db: Session = Depends(get_db)):
+    try:
+        parse_studio_job(db, job_id)
+        db.commit()
+        return RedirectResponse(f"/studio-jobs/{job_id}?msg=GPT JSON 已重新解析", status_code=303)
+    except HTTPException as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc.detail))}", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/studio-jobs/{job_id}/submit-review-form")
+async def studio_job_submit_review_form(job_id: str, db: Session = Depends(get_db)):
+    try:
+        submit_job_review(db, job_id)
+        db.commit()
+        return RedirectResponse(f"/studio-jobs/{job_id}?msg=任务已提交审核", status_code=303)
+    except HTTPException as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc.detail))}", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/studio-jobs/{job_id}/approve-form")
+async def studio_job_approve_form(job_id: str, db: Session = Depends(get_db)):
+    try:
+        approve_job(db, job_id)
+        db.commit()
+        return RedirectResponse(f"/studio-jobs/{job_id}?msg=任务审核通过", status_code=303)
+    except HTTPException as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc.detail))}", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/studio-jobs/{job_id}/reject-form")
+async def studio_job_reject_form(job_id: str, request: Request, db: Session = Depends(get_db)):
+    form = await parse_urlencoded(request)
+    try:
+        reject_job(db, job_id, form.get("review_note", ""))
+        db.commit()
+        return RedirectResponse(f"/studio-jobs/{job_id}?msg=任务已退回修改", status_code=303)
+    except HTTPException as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc.detail))}", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
+@app.post("/studio-jobs/{job_id}/start-form")
+async def studio_job_start_form(job_id: str, db: Session = Depends(get_db)):
+    try:
+        start_job_generation(db, job_id)
+        db.commit()
+        return RedirectResponse(f"/studio-jobs/{job_id}?msg=生成已启动", status_code=303)
+    except HTTPException as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc.detail))}", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(f"/studio-jobs/{job_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+
+
 @app.post("/video-projects/{project_id}/scenes/add-form")
 async def video_project_scene_add_form(project_id: str, db: Session = Depends(get_db)):
     try:
@@ -2566,9 +2957,9 @@ async def scene_delete_form(scene_id: str, request: Request, db: Session = Depen
 @app.post("/video-projects/{project_id}/generation-plan-form")
 async def video_project_generation_plan_form(project_id: str, db: Session = Depends(get_db)):
     try:
-        create_generation_plan(db, project_id)
+        start_job_generation(db, project_id)
         db.commit()
-        return RedirectResponse(f"/video-projects/{project_id}?msg=生成计划已创建", status_code=303)
+        return RedirectResponse(f"/video-projects/{project_id}?msg=生成已启动", status_code=303)
     except Exception as exc:
         db.rollback()
         return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
@@ -2579,7 +2970,7 @@ async def scene_generate_image_form(scene_id: str, request: Request, db: Session
     form = await parse_urlencoded(request)
     project_id = form.get("project_id", "")
     try:
-        task = create_scene_image_task(db, scene_id, "comfyui")
+        task = create_reviewed_scene_image_task(db, scene_id, "comfyui")
         payload = run_generation_task(db, task.id)
         db.commit()
         status_label = payload["task"]["status"]

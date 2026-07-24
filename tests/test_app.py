@@ -116,6 +116,13 @@ class StudioAppTests(unittest.TestCase):
         self.assertIn("failed_step", content)
         self.assertIn("completed_at", content)
 
+    def test_studio_job_review_migration_exists(self):
+        with open("migrations/versions/0014_add_studio_job_review_fields.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("review_status", content)
+        self.assertIn("review_note", content)
+        self.assertIn("editorial_json_snapshot", content)
+
 
 class ContentPoolTests(unittest.TestCase):
     def setUp(self):
@@ -720,6 +727,13 @@ class ContentPoolTests(unittest.TestCase):
             response = self.client.post(f"/api/ai/jobs/{job}/run")
         self.assertEqual(response.json()["status"], "completed")
 
+    def approve_project_for_generation(self, project_id: str):
+        submitted = self.client.post(f"/api/studio/jobs/{project_id}/submit-review")
+        self.assertEqual(submitted.status_code, 200)
+        approved = self.client.post(f"/api/studio/jobs/{project_id}/approve")
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.json()["review_status"], "approved")
+
     def valid_editorial_output(self, title="Planner Reset"):
         return {
             "title": title,
@@ -972,19 +986,23 @@ class ContentPoolTests(unittest.TestCase):
         self.assertIsNone(payload["persona_id"])
         self.assertIsNone(payload["social_account_id"])
 
+        blocked_plan = self.client.post(f"/api/video-projects/{payload['id']}/generation-plan")
+        self.assertEqual(blocked_plan.status_code, 409)
+        self.approve_project_for_generation(payload["id"])
         plan = self.client.post(f"/api/video-projects/{payload['id']}/generation-plan")
         self.assertEqual(plan.status_code, 200)
         plan_payload = plan.json()
-        self.assertEqual(plan_payload["pipeline"]["status"], "queued")
-        self.assertEqual(plan_payload["pipeline"]["total_tasks"], 5)
-        task_types = [task["task_type"] for task in plan_payload["tasks"]]
+        self.assertEqual(plan_payload["status"], "running")
+        task_types = [task["task_type"] for task in plan_payload["generation_tasks"]]
         self.assertEqual(
-            task_types,
-            ["image_generation", "video_generation", "voice_generation", "subtitle_generation", "composition"],
+            set(task_types),
+            {"image_generation", "video_generation", "voice_generation", "subtitle_generation", "composition"},
         )
-        self.assertEqual(plan_payload["tasks"][0]["context"]["video_project_id"], payload["id"])
-        self.assertIsNone(plan_payload["tasks"][0]["context"]["persona_id"])
-        self.assertIsNotNone(plan_payload["tasks"][1]["depends_on_task_id"])
+        image_task = next(task for task in plan_payload["generation_tasks"] if task["task_type"] == "image_generation")
+        video_task = next(task for task in plan_payload["generation_tasks"] if task["task_type"] == "video_generation")
+        self.assertEqual(image_task["context"]["video_project_id"], payload["id"])
+        self.assertIsNone(image_task["context"]["persona_id"])
+        self.assertIsNotNone(video_task["depends_on_task_id"])
 
         queue_api = self.client.get("/api/generation-tasks", params={"status": "queued"})
         self.assertEqual(queue_api.status_code, 200)
@@ -1107,6 +1125,105 @@ class ContentPoolTests(unittest.TestCase):
             self.assertEqual(len(scenes), 2)
             self.assertEqual([scene.scene_number for scene in scenes], [1, 2])
 
+    def test_studio_job_dashboard_review_json_parse_and_start_flow(self):
+        item_id = self.create_pushed_item("job-flow-1", "Studio jobs need human review before generation", 92, 19, "low")
+        package = self.client.post(
+            "/api/topic-packages/from-content-items",
+            json={"title": "Studio job review", "content_item_ids": [item_id]},
+        ).json()
+        self.create_topic_intelligence_analysis(package["id"])
+        self.create_prompt("editorial")
+        prompt = self.client.get(f"/api/topic-packages/{package['id']}/editorial-prompt")
+        brief = self.client.post(
+            "/api/editorial-briefs",
+            json={
+                "topic_package_id": package["id"],
+                "prompt_snapshot": prompt.json()["prompt"],
+                "prompt_template_id": prompt.json()["prompt_template_id"],
+                "output_json": self.valid_editorial_output("Human Review Job"),
+            },
+        ).json()
+        project = self.client.post(
+            "/api/video-projects/from-brief",
+            json={"editorial_brief_id": brief["id"], "creation_mode": "general"},
+        ).json()
+        project_id = project["id"]
+
+        jobs = self.client.get("/api/studio/jobs", params={"status": "draft"})
+        self.assertEqual(jobs.status_code, 200)
+        self.assertTrue(any(row["id"] == project_id for row in jobs.json()["items"]))
+        detail = self.client.get(f"/api/studio/jobs/{project_id}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["review_status"], "draft")
+        self.assertIn("source_items", detail.json())
+
+        invalid = self.client.put(f"/api/studio/jobs/{project_id}/editorial-json", json={"editorial_json": "not json"})
+        self.assertEqual(invalid.status_code, 422)
+        old_scene_count = len(self.client.get(f"/api/studio/jobs/{project_id}").json()["scenes"])
+        parse_after_invalid = self.client.post(f"/api/studio/jobs/{project_id}/parse")
+        self.assertEqual(parse_after_invalid.status_code, 200)
+        self.assertEqual(len(parse_after_invalid.json()["scenes"]), old_scene_count)
+
+        no_scene_json = self.valid_editorial_output("No Scene Job")
+        no_scene_json["scenes"] = []
+        saved_no_scene = self.client.put(
+            f"/api/studio/jobs/{project_id}/editorial-json",
+            json={"editorial_json": json.dumps(no_scene_json)},
+        )
+        self.assertEqual(saved_no_scene.status_code, 200)
+        failed_parse = self.client.post(f"/api/studio/jobs/{project_id}/parse")
+        self.assertEqual(failed_parse.status_code, 422)
+        self.assertEqual(len(self.client.get(f"/api/studio/jobs/{project_id}").json()["scenes"]), old_scene_count)
+
+        updated_json = self.valid_editorial_output("Updated Review Job")
+        updated_json["scenes"][0]["voiceover"] = "This revised scene is ready for review."
+        saved = self.client.put(
+            f"/api/studio/jobs/{project_id}/editorial-json",
+            json={"editorial_json": json.dumps(updated_json)},
+        )
+        self.assertEqual(saved.status_code, 200)
+        parsed = self.client.post(f"/api/studio/jobs/{project_id}/parse")
+        self.assertEqual(parsed.status_code, 200)
+        self.assertEqual(parsed.json()["scenes"][0]["voiceover"], "This revised scene is ready for review.")
+
+        blocked_start = self.client.post(f"/api/studio/jobs/{project_id}/start")
+        self.assertEqual(blocked_start.status_code, 409)
+        submitted = self.client.post(f"/api/studio/jobs/{project_id}/submit-review")
+        self.assertEqual(submitted.status_code, 200)
+        self.assertEqual(submitted.json()["review_status"], "pending_review")
+        illegal_resubmit = self.client.post(f"/api/studio/jobs/{project_id}/submit-review")
+        self.assertEqual(illegal_resubmit.status_code, 409)
+        rejected = self.client.post(f"/api/studio/jobs/{project_id}/reject", json={"review_note": "旁白过长"})
+        self.assertEqual(rejected.status_code, 200)
+        self.assertEqual(rejected.json()["review_status"], "rejected")
+        self.assertEqual(rejected.json()["review_note"], "旁白过长")
+        rejected_start = self.client.post(f"/api/studio/jobs/{project_id}/start")
+        self.assertEqual(rejected_start.status_code, 409)
+        saved_again = self.client.put(
+            f"/api/studio/jobs/{project_id}/editorial-json",
+            json={"editorial_json": json.dumps(updated_json)},
+        )
+        self.assertEqual(saved_again.json()["review_status"], "draft")
+        self.client.post(f"/api/studio/jobs/{project_id}/submit-review")
+        approved = self.client.post(f"/api/studio/jobs/{project_id}/approve")
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.json()["review_status"], "approved")
+        started = self.client.post(f"/api/studio/jobs/{project_id}/start")
+        self.assertEqual(started.status_code, 200)
+        self.assertEqual(started.json()["status"], "running")
+        running_again = self.client.post(f"/api/studio/jobs/{project_id}/start")
+        self.assertEqual(running_again.status_code, 409)
+
+        page = self.client.get("/studio-jobs", params={"status": "approved"})
+        detail_page = self.client.get(f"/studio-jobs/{project_id}")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("任务控制中心", page.text)
+        self.assertIn("审核状态", page.text)
+        self.assertEqual(detail_page.status_code, 200)
+        self.assertIn("GPT 编辑内容", detail_page.text)
+        self.assertIn("Scene 预览", detail_page.text)
+        self.assertIn("This revised scene is ready for review.", detail_page.text)
+
     def test_generation_task_failure_retry_and_queue_ui(self):
         item_id = self.create_pushed_item("retry-1", "Retry image generation scene", 84, 13, "low")
         package = self.client.post(
@@ -1130,6 +1247,7 @@ class ContentPoolTests(unittest.TestCase):
             json={"editorial_brief_id": brief["id"], "creation_mode": "general"},
         ).json()
         scene_id = project["scenes"][0]["id"]
+        self.approve_project_for_generation(project["id"])
         with self.Session() as db:
             db.add(
                 StudioGenerationWorkflow(
@@ -1299,6 +1417,7 @@ class ContentPoolTests(unittest.TestCase):
             json={"editorial_brief_id": brief["id"], "creation_mode": "general"},
         ).json()
         scene_id = project["scenes"][0]["id"]
+        self.approve_project_for_generation(project["id"])
         with self.Session() as db:
             db.add(
                 StudioGenerationWorkflow(
@@ -1464,6 +1583,7 @@ class ContentPoolTests(unittest.TestCase):
             json={"editorial_brief_id": brief["id"], "creation_mode": "general"},
         ).json()
         scene_id = project["scenes"][0]["id"]
+        self.approve_project_for_generation(project["id"])
 
         with patch("services.generation_executor.get_generation_provider", return_value=FakeComfyUI()):
             failed = self.client.post(
