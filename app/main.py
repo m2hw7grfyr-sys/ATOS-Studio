@@ -2166,22 +2166,14 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
     project = serialize_video_project(db, row, include_detail=True)
     brief = project.get("editorial_brief") or {}
     output = brief.get("output") or {}
-    available_workflows = list_workflows(db, "comfyui", "image_generation", "available")
-    workflow_options = "".join(
-        f'<option value="{escape(workflow["id"])}">{escape(workflow["name"])} · {escape(workflow.get("version") or "")}</option>'
-        for workflow in available_workflows
-    )
-    workflow_select = (
-        f'<select class="field" name="workflow_id">{workflow_options}</select>'
-        if workflow_options
-        else '<span class="status-warn">没有 available Workflow，请先到 Workflow管理 测试并启用</span>'
-    )
+    comfyui_notice = "" if get_settings().comfyui_effective_url else message_html("ComfyUI 未配置。", "warn")
     scenes_rows = ""
     for scene in project.get("scenes") or []:
         assets = scene_assets(db, scene["id"])
         latest_asset = assets[0] if assets else None
+        image_path = (latest_asset.get("file_path") or latest_asset.get("url") or "") if latest_asset else ""
         preview = (
-            f'<img src="{escape(latest_asset.get("url") or latest_asset.get("file_path") or "")}" alt="Scene image" style="max-width:180px;border-radius:6px;border:1px solid var(--line);">'
+            f'<img src="{escape(latest_asset.get("url") or latest_asset.get("file_path") or "")}" alt="Scene image" style="max-width:180px;border-radius:6px;border:1px solid var(--line);"><div class="label">图片路径</div><code>{escape(image_path)}</code>'
             if latest_asset and (latest_asset.get("url") or latest_asset.get("file_path"))
             else '<span class="status-warn">暂无图片</span>'
         )
@@ -2198,7 +2190,7 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
             f'<td>{escape(latest_task.get("status") or scene.get("status") or "等待")}</td>'
             f'<td>{preview}</td>'
             '<td><div class="actions">'
-            f'<form method="post" action="/scenes/{escape(scene["id"])}/generate-image-form"><input type="hidden" name="project_id" value="{escape(project["id"])}">{workflow_select}<button class="button" type="submit">生成画面</button></form>'
+            f'<form method="post" action="/scenes/{escape(scene["id"])}/generate-image-form"><input type="hidden" name="project_id" value="{escape(project["id"])}"><button class="button" type="submit">生成图片</button></form>'
             "</div></td>"
             "</tr>"
         )
@@ -2271,6 +2263,7 @@ def video_project_detail(project_id: str, msg: str = "", level: str = "ok", db: 
       </section>
       <section class="panel">
         <h2>Scenes</h2>
+        {comfyui_notice}
         {scenes_html}
       </section>
       <section class="panel">
@@ -2302,18 +2295,28 @@ async def scene_generate_image_form(scene_id: str, request: Request, db: Session
     form = await parse_urlencoded(request)
     project_id = form.get("project_id", "")
     try:
-        task = create_scene_image_task(db, scene_id, "comfyui", form.get("workflow_id") or None)
+        task = create_scene_image_task(db, scene_id, "comfyui")
         payload = run_generation_task(db, task.id)
         db.commit()
         status_label = payload["task"]["status"]
         level = "ok" if status_label in {"completed", "running"} else "warn"
+        message = "图片生成成功" if status_label == "completed" else f"图片生成任务状态：{status_label}"
+        if payload["task"].get("error_message") == "provider_offline":
+            message = "ComfyUI is offline."
+        elif status_label == "failed":
+            message = "Workflow execution failed."
         return RedirectResponse(
-            f"/video-projects/{project_id}?level={level}&msg=图片生成任务状态：{quote(status_label)}",
+            f"/video-projects/{project_id}?level={level}&msg={quote(message)}",
             status_code=303,
         )
     except Exception as exc:
         db.rollback()
-        return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(str(exc))}", status_code=303)
+        raw_message = str(exc)
+        if "ComfyUI" in raw_message or "provider_offline" in raw_message:
+            message = "ComfyUI is offline."
+        else:
+            message = "Workflow execution failed."
+        return RedirectResponse(f"/video-projects/{project_id}?level=warn&msg={quote(message)}", status_code=303)
 
 
 def placeholder_page(page_key: str) -> HTMLResponse:

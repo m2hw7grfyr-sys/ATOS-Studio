@@ -303,11 +303,10 @@ def run_generation_task(db: Session, task_id: str) -> dict[str, Any]:
                     metadata_json=stable_json(asset_payload.get("metadata") or {}),
                 )
             )
-        if assets_payload:
-            task.status = "completed"
-            task.finished_at = utc_now()
-        else:
-            task.status = "running"
+        if not assets_payload:
+            raise RuntimeError("Workflow execution failed.")
+        task.status = "completed"
+        task.finished_at = utc_now()
         task.output_json = stable_json(
             {
                 "submit": submitted,

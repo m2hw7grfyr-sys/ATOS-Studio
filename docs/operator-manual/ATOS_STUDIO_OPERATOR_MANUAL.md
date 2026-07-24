@@ -10,7 +10,7 @@ ATOS 负责发现内容、抓取来源、分析线索和把候选内容送入 St
 
 ATOS Studio 负责把候选内容整理成可生产的内容资产，包括内容池、主题包、AI 分析和后续 GPT 编导输入。
 
-当前版本不会生成视频，不会调用 ComfyUI，不会发布内容。
+当前版本不会生成视频，不会发布内容。配置 ComfyUI 后，可以生成 Scene 图片。
 
 ## 2. 当前工作流程
 
@@ -376,7 +376,7 @@ ChatGPT 返回内容必须是 JSON。
 - 数据库
 - Prompt Template 内部结构
 - 视频模型
-- ComfyUI
+- ComfyUI 图片生成已支持；视频生成未支持
 
 ## 8. Persona与账号管理
 
@@ -491,7 +491,7 @@ Task 是 Pipeline 里的具体步骤。
 - failed：失败
 - cancelled：取消
 
-当前 Sprint 的 Task 只是生产管理对象，不会连接 ComfyUI、Wan、FLUX、TTS、FFmpeg 或任何外部视频服务。
+当前可执行的是 ComfyUI 图片生成；Wan、FLUX、TTS、FFmpeg 等外部视频服务仍未接入。
 
 ### 从Editorial Brief创建项目
 
@@ -551,7 +551,7 @@ Sprint 09 的目标是建立生产队列和 Provider Adapter 架构。
 - 调用视频模型
 - 调用 TTS
 - 调用 FFmpeg
-- 自动生成图片或视频
+- 自动生成视频
 - 自动发布
 
 ## 10. 图片生成流程
@@ -600,7 +600,7 @@ Provider 是实际执行生成的工具。
 1. 打开 `视频项目`。
 2. 进入某个视频项目详情。
 3. 找到 `Scenes`。
-4. 在某个 Scene 右侧点击 `生成画面`。
+4. 在某个 Scene 右侧点击 `生成图片`。
 5. 系统会创建一条 `image_generation` 任务。
 6. 如果 ComfyUI 可用，任务会提交到 ComfyUI。
 7. 生成完成后，图片会作为 Asset 保存并显示在 Scene 预览中。
@@ -617,7 +617,6 @@ Provider 是实际执行生成的工具。
 常见失败原因：
 
 - ComfyUI 没有启动。
-- `COMFYUI_ENABLED=false`。
 - `COMFYUI_URL` 不正确。
 - Workflow JSON 不是可执行的 ComfyUI API workflow。
 - ComfyUI 生成中断或超时。
@@ -627,7 +626,7 @@ Provider 是实际执行生成的工具。
 1. 检查 ComfyUI 是否能打开。
 2. 检查 Studio 的 ComfyUI 配置。
 3. 检查 `生成队列` 中的错误状态。
-4. 修正后重新点击 `生成画面`。
+4. 修正后重新点击 `生成图片`。
 
 当前版本不会自动重试，也不会自动执行视频生成。
 

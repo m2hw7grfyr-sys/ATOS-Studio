@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     studio_storage_root: str = Field(default=str(ROOT_DIR / "storage"))
     studio_port: int = 8502
     comfyui_base_url: str = ""
-    comfyui_enabled: bool = False
-    comfyui_url: str = "http://127.0.0.1:8188"
+    comfyui_enabled: bool = True
+    comfyui_url: str = ""
     comfyui_timeout_seconds: float = 120
     gpu_worker_url: str = ""
     backup_provider: str = "none"
@@ -56,7 +56,7 @@ class Settings(BaseSettings):
 
     @property
     def comfyui_status(self) -> str:
-        return "Configured" if self.comfyui_enabled and self.comfyui_effective_url else "Not configured"
+        return "Configured" if self.comfyui_effective_url else "Not configured"
 
     @property
     def comfyui_effective_url(self) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,6 +44,14 @@ class ComfyUIProvider(GenerationProvider):
             raise RuntimeError("ComfyUI request timed out") from exc
 
     def health_check(self) -> dict[str, Any]:
+        if not self.base_url:
+            return {
+                "provider": self.provider_name,
+                "provider_type": self.provider_type,
+                "available": False,
+                "status": "not_configured",
+                "message": "ComfyUI URL is not configured.",
+            }
         if not self.enabled:
             return {
                 "provider": self.provider_name,
@@ -97,7 +106,11 @@ class ComfyUIProvider(GenerationProvider):
         }
 
     def get_result(self, provider_task_id: Optional[str]) -> dict[str, Any]:
+        deadline = time.time() + max(self.timeout_seconds, 1)
         status = self.get_status(provider_task_id)
+        while status.get("status") == "running" and time.time() < deadline:
+            time.sleep(1)
+            status = self.get_status(provider_task_id)
         history = status.get("raw_response") or {}
         assets = []
         outputs = history.get("outputs") or {}
@@ -106,17 +119,20 @@ class ComfyUIProvider(GenerationProvider):
                 filename = image.get("filename")
                 if not filename:
                     continue
+                image_type = image.get("type") or "output"
+                subfolder = image.get("subfolder") or ""
+                file_path = "/".join(part for part in [image_type, subfolder, filename] if part)
                 query = urllib.parse.urlencode(
                     {
                         "filename": filename,
-                        "subfolder": image.get("subfolder") or "",
-                        "type": image.get("type") or "output",
+                        "subfolder": subfolder,
+                        "type": image_type,
                     }
                 )
                 assets.append(
                     {
                         "asset_type": "image",
-                        "file_path": "",
+                        "file_path": file_path,
                         "url": f"{self.base_url}/view?{query}",
                         "metadata": image,
                     }

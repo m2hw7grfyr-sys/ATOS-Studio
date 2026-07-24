@@ -99,8 +99,8 @@ class StudioAppTests(unittest.TestCase):
         self.assertIn("studio_generation_workflows", content)
         self.assertIn("studio_assets", content)
         self.assertIn("basic_image_generation", content)
-        self.assertIn("COMFYUI_ENABLED=false", env_content)
         self.assertIn("COMFYUI_URL=http://127.0.0.1:8188", env_content)
+        self.assertNotIn("COMFYUI_ENABLED=false", env_content)
 
 
 class ContentPoolTests(unittest.TestCase):
@@ -1078,11 +1078,13 @@ class ContentPoolTests(unittest.TestCase):
         detail_page = self.client.get(f"/video-projects/{project['id']}")
         self.assertIn("prompt-123", queue_page.text)
         self.assertIn("1 asset", queue_page.text)
-        self.assertIn("生成画面", detail_page.text)
+        self.assertIn("生成图片", detail_page.text)
+        self.assertNotIn('name="workflow_id"', detail_page.text)
+        self.assertIn("图片路径", detail_page.text)
         self.assertIn("test.png", detail_page.text)
 
     def test_comfyui_health_disabled_and_unavailable(self):
-        disabled = ComfyUIProvider(enabled=False).health_check()
+        disabled = ComfyUIProvider(base_url="http://127.0.0.1:8188", enabled=False).health_check()
         self.assertEqual(disabled["status"], "disabled")
         unavailable = ComfyUIProvider(base_url="http://127.0.0.1:1", timeout_seconds=0.01, enabled=True).health_check()
         self.assertEqual(unavailable["status"], "unavailable")

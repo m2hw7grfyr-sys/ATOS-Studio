@@ -30,7 +30,7 @@ Sprint 06 adds topic intelligence:
 topic package -> package-level AI context -> topic_intelligence_analysis -> structured strategy insights
 ```
 
-Video generation, ComfyUI, Wan, TTS, subtitles, FFmpeg, cloud backup, automatic ingestion, clustering, and shared user login are not implemented.
+Video generation, Wan, TTS, subtitles, FFmpeg, cloud backup, automatic ingestion, clustering, and shared user login are not implemented. ComfyUI image generation is supported when `COMFYUI_URL` is configured.
 
 ## Environment
 
@@ -507,12 +507,11 @@ Sprint 10 adds the first real generation adapter: ComfyUI image generation.
 Environment:
 
 ```bash
-COMFYUI_ENABLED=false
 COMFYUI_URL=http://127.0.0.1:8188
 COMFYUI_TIMEOUT_SECONDS=120
 ```
 
-`COMFYUI_ENABLED=false` is the default. Studio starts normally when ComfyUI is disabled or unavailable.
+If `COMFYUI_URL` is empty, the Video Project page shows `ComfyUI 未配置。`. Studio starts normally when ComfyUI is unavailable.
 
 Health:
 
@@ -526,7 +525,7 @@ Workflow:
 curl "http://127.0.0.1:8502/api/generation-workflows?provider=comfyui&workflow_type=image_generation"
 ```
 
-Generate an image for a scene:
+Generate an image for a scene. Studio uses the first `available` `image_generation` workflow:
 
 ```bash
 curl -X POST "http://127.0.0.1:8502/api/scenes/{scene_id}/generate-image?run_now=true"
